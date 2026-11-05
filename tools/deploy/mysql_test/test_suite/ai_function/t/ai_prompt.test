@@ -231,3 +231,20 @@ WITH t3 AS (
 SELECT * FROM t3;
 
 drop table t1;
+
+# AI_PROMPT enhancement regressions: preserve JSON types and read LOB payloads.
+select json_type(json_extract(ai_prompt('{0}', json_array()), '$.args[0]')) as array_type;
+select json_type(json_extract(ai_prompt('{0}', json_object()), '$.args[0]')) as object_type;
+select json_unquote(json_extract(ai_prompt('{0}', json_object('k', json_array('中文', json_object()))), '$.args[0].k[0]')) as unicode_value;
+select json_unquote(json_extract(ai_prompt('{0}', ai_prompt('inner {0}', 'value')), '$.args[0].template')) as nested_template;
+select json_unquote(json_extract(ai_prompt('{0}{0}{1}', 'x', 'y'), '$.template')) as template_value;
+create table ai_prompt_lob_regression (id int primary key, t text, l longtext);
+insert into ai_prompt_lob_regression values (1, '模板{0}', repeat('世界', 40000));
+select json_unquote(json_extract(ai_prompt(t, l), '$.template')) = t as text_template,
+       char_length(json_unquote(json_extract(ai_prompt(t, l), '$.args[0]'))) = 80000 as longtext_arg,
+       json_unquote(json_extract(ai_prompt(l, t), '$.template')) = l as longtext_template,
+       json_unquote(json_extract(ai_prompt(l, t), '$.args[0]')) = t as text_arg
+from ai_prompt_lob_regression;
+--error 5083
+select ai_prompt(t, cast(null as char)) from ai_prompt_lob_regression;
+drop table ai_prompt_lob_regression;
