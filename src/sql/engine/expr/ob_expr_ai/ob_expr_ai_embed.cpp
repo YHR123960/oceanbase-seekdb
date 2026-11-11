@@ -46,7 +46,6 @@ int ObExprAIEmbed::calc_result_typeN(ObExprResType &type,
                                      common::ObExprTypeCtx &type_ctx) const 
 {
   UNUSED(type_ctx);
-  UNUSED(types_stack);
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(param_num > 3 || param_num < 2)) {
     ObString func_name_(get_name());
@@ -59,9 +58,8 @@ int ObExprAIEmbed::calc_result_typeN(ObExprResType &type,
     types_stack[CONTENT_IDX].set_calc_collation_type(CS_TYPE_UTF8MB4_BIN);
     if (param_num == 3) {
       if (ob_is_integer_type(types_stack[DIM_IDX].get_type())) {
-        types_stack[DIM_IDX].set_calc_type(ObIntType);
-        types_stack[DIM_IDX].set_precision(10);
-        types_stack[DIM_IDX].set_scale(0);
+        const ObObjType dim_type = types_stack[DIM_IDX].get_type();
+        types_stack[DIM_IDX].set_calc_type(ob_is_uint_tc(dim_type) ? ObUInt64Type : ObIntType);
       } else {
         ret = OB_INVALID_ARGUMENT;
         LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_embed, dimension parameter must be an integer, not a decimal or float");
@@ -105,13 +103,25 @@ int ObExprAIEmbed::eval_ai_embed(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &re
     }
     int64_t dim = 0;
     ObJsonInt *dim_json = nullptr;
+    // Model metadata has no dimension and endpoint parameters are reserved.
+    // With two arguments, leave dimensions absent so the provider uses its default.
     ObJsonObject *config = nullptr;
     if (OB_FAIL(ret)) {
     } else if (OB_NOT_NULL(arg_dim)) {
-      dim = arg_dim->get_int();
+      // Keep unsigned values unsigned until the range check, even under permissive SQL modes.
+      if (!arg_dim->is_null()) {
+        if (ob_is_uint_tc(expr.args_[DIM_IDX]->datum_meta_.type_)) {
+          const uint64_t unsigned_dim = arg_dim->get_uint();
+          if (unsigned_dim <= static_cast<uint64_t>(INT64_MAX)) {
+            dim = static_cast<int64_t>(unsigned_dim);
+          }
+        } else {
+          dim = arg_dim->get_int();
+        }
+      }
       if (dim <= 0) {
         ret = OB_INVALID_ARGUMENT;
-        LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_embed, dimension parameter must be a positive integer");
+        LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_embed, dimension must be a positive signed 64-bit integer");
         res.set_null();
       } else if (OB_FAIL(ObAIFuncJsonUtils::get_json_object(temp_allocator, config))) {
       } else if (OB_FAIL(ObAIFuncJsonUtils::get_json_int(temp_allocator, dim, dim_json))) {
