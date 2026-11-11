@@ -70,6 +70,12 @@ from (select ai_rerank('enhance_rerank','apple',
 'text') as r) x;
 first_id	rerank_count
 a	2
+select json_length(ai_rerank('enhance_rerank', 'apple', json_array('apple','banana'), null, 1)) as rerank_top_count;
+rerank_top_count
+1
+select json_extract(ai_rerank('enhance_rerank', 'apple', '[{"id":"a","text":"apple","tag":7},{"id":"b","text":"banana","tag":8}]', 'text', 1), '$[0].tag') as rerank_top_tag;
+rerank_top_tag
+7
 call DBMS_AI_SERVICE.DROP_AI_MODEL('enhance_ollama_complete');
 call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('enhance_ollama_complete_ep');
 call DBMS_AI_SERVICE.CREATE_AI_MODEL(
