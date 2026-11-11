@@ -57,19 +57,20 @@ int ObExprAIComplete::calc_result_typeN(ObExprResType &type,
     types_stack[MODEL_IDX].set_calc_collation_type(CS_TYPE_UTF8MB4_BIN);
     if (ob_is_string_type(types_stack[PROMPT_IDX].get_type())) {
       types_stack[PROMPT_IDX].set_calc_collation_type(CS_TYPE_UTF8MB4_BIN);
-    } else if (ob_is_json(types_stack[PROMPT_IDX].get_type())) {
+    } else if (ob_is_json(types_stack[PROMPT_IDX].get_type()) ||
+               types_stack[PROMPT_IDX].get_type() == ObNullType) {
     } else {
       ret = OB_ERR_INVALID_TYPE_FOR_OP;
     }
 
     if (OB_FAIL(ret)) {
     } else if (param_num == 3) {
-      ObObjType in_type = types_stack[CONFIG_IDX].get_type();
-      if (OB_FAIL(ObJsonExprHelper::is_valid_for_json(types_stack, CONFIG_IDX, N_AI_COMPLETE))) {
-      } else if (ob_is_string_type(in_type) && types_stack[CONFIG_IDX].get_collation_type() != CS_TYPE_BINARY) {
-        if (types_stack[CONFIG_IDX].get_charset_type() != CHARSET_UTF8MB4) {
-          types_stack[CONFIG_IDX].set_calc_collation_type(CS_TYPE_UTF8MB4_BIN);
-        }
+      const ObObjType config_type = types_stack[CONFIG_IDX].get_type();
+      if (config_type != ObNullType && !ob_is_json(config_type) && !ob_is_string_type(config_type)) {
+        ret = OB_ERR_INVALID_TYPE_FOR_JSON;
+        LOG_USER_ERROR(OB_ERR_INVALID_TYPE_FOR_JSON, CONFIG_IDX + 1, N_AI_COMPLETE);
+      } else if (ob_is_string_type(config_type)) {
+        ret = ObJsonExprHelper::is_valid_for_json(types_stack, CONFIG_IDX, N_AI_COMPLETE);
       }
     }
     if (OB_SUCC(ret)) {
@@ -104,12 +105,11 @@ int ObExprAIComplete::eval_ai_complete(const ObExpr &expr,
     ObString model_id = arg_model_id->get_string();
     ObString prompt;
     ObJsonObject *config = nullptr;
-    ObString config_str;
     share::ObAiModelEndpointInfo resolved_endpoint;
     const share::ObAiModelEndpointInfo *endpoint_info = &resolved_endpoint;
     query::ObIAiEndpointResolver *endpoint_resolver =
         ::oceanbase::share::server_service<::oceanbase::query::ObIAiEndpointResolver>();
-    ObExpr *arg_expr_prompt = expr.args_[1];
+    ObExpr *arg_expr_prompt = expr.args_[PROMPT_IDX];
     if ( OB_ISNULL(arg_expr_prompt) ) {
       ret = OB_ERR_UNEXPECTED;
     } else if (arg_expr_prompt->datum_meta_.type_ == ObJsonType) {
@@ -117,7 +117,7 @@ int ObExprAIComplete::eval_ai_complete(const ObExpr &expr,
       ObJsonObject *prompt_object = nullptr;
       bool is_null = false;
       if (OB_FAIL(ObJsonExprHelper::get_json_doc(expr, ctx, temp_allocator, PROMPT_IDX, j_base, is_null))) {
-      } else if (j_base->json_type() != ObJsonNodeType::J_OBJECT) {
+      } else if (is_null || OB_ISNULL(j_base) || j_base->json_type() != ObJsonNodeType::J_OBJECT) {
         ret = OB_INVALID_ARGUMENT;
       } else if (OB_FALSE_IT(prompt_object = static_cast<ObJsonObject *>(j_base))) {
       } else if (!ObAIFuncPromptObjectUtils::is_valid_prompt_object(prompt_object)) {
@@ -130,9 +130,26 @@ int ObExprAIComplete::eval_ai_complete(const ObExpr &expr,
     }
 
     if (OB_FAIL(ret)) {
-    } else if (OB_NOT_NULL(arg_config)) {
-      if (OB_FAIL(ObTextStringHelper::read_real_string_data(ctx.exec_ctx_, temp_allocator, *arg_config, expr.args_[2]->datum_meta_, expr.args_[2]->obj_meta_.has_lob_header(), config_str))) {
-      } else if (OB_FAIL(ObAIFuncJsonUtils::get_json_object_form_str(temp_allocator, config_str, config))) {
+    } else if (OB_NOT_NULL(arg_config) && !arg_config->is_null()) {
+      const ObExpr &config_expr = *expr.args_[CONFIG_IDX];
+      if (ob_is_json(config_expr.datum_meta_.type_)) {
+        ObIJsonBase *config_doc = nullptr;
+        bool is_null = false;
+        if (OB_FAIL(ObJsonExprHelper::get_json_doc(expr, ctx, temp_allocator, CONFIG_IDX, config_doc, is_null))) {
+        } else if (!is_null) {
+          if (OB_ISNULL(config_doc) || config_doc->json_type() != ObJsonNodeType::J_OBJECT) {
+            ret = OB_INVALID_ARGUMENT;
+            LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_complete config must be a JSON object");
+          } else {
+            config = static_cast<ObJsonObject *>(config_doc);
+          }
+        }
+      } else {
+        ObString config_str;
+        if (OB_FAIL(ObTextStringHelper::read_real_string_data(ctx.exec_ctx_, temp_allocator, *arg_config,
+                config_expr.datum_meta_, config_expr.obj_meta_.has_lob_header(), config_str))) {
+        } else if (OB_FAIL(ObAIFuncJsonUtils::get_json_object_form_str(temp_allocator, config_str, config))) {
+        }
       }
     }
 

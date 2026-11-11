@@ -26,6 +26,30 @@ select length(ai_complete('enhance_complete', 'hello', null)) > 0 as complete_ok
 select length(ai_complete(
   'enhance_complete', ai_prompt('describe {0}', json_object('text','你好')),
   '{"temperature":0.2,"max_tokens":16}')) > 0 as complete_config_ok;
+select length(ai_complete('enhance_complete', 'hello')) > 0 as complete_omitted_ok;
+select length(ai_complete('enhance_complete', 'hello', json_object('temperature', 0.2, 'max_tokens', 16))) > 0 as complete_json_ok;
+select length(ai_complete('enhance_complete', cast(repeat('abc', 1024) as char))) > 0 as complete_long_ok;
+
+--disable_query_log
+--disable_result_log
+--error 1210
+select ai_complete('enhance_complete', null);
+--error 1210
+select ai_complete('enhance_complete', '');
+--error 1210
+select ai_complete('enhance_complete', 'hello', '[]');
+--error 1210
+select ai_complete('enhance_complete', 'hello', json_array(1));
+--error 1210
+select ai_complete('enhance_complete', 'hello', '{"temperature":2.1}');
+--error 1210
+select ai_complete('enhance_complete', 'hello', '{"temperature":"0.2"}');
+--error 1210
+select ai_complete('enhance_complete', 'hello', '{"max_tokens":0}');
+--error 1210
+select ai_complete('enhance_complete', 'hello', '{"max_tokens":1.5}');
+--enable_result_log
+--enable_query_log
 
 --error 0,11118
 call DBMS_AI_SERVICE.DROP_AI_MODEL('enhance_embed');

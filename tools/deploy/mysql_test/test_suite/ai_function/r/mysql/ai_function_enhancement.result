@@ -22,6 +22,15 @@ select length(ai_complete(
 '{"temperature":0.2,"max_tokens":16}')) > 0 as complete_config_ok;
 complete_config_ok
 1
+select length(ai_complete('enhance_complete', 'hello')) > 0 as complete_omitted_ok;
+complete_omitted_ok
+1
+select length(ai_complete('enhance_complete', 'hello', json_object('temperature', 0.2, 'max_tokens', 16))) > 0 as complete_json_ok;
+complete_json_ok
+1
+select length(ai_complete('enhance_complete', cast(repeat('abc', 1024) as char))) > 0 as complete_long_ok;
+complete_long_ok
+1
 call DBMS_AI_SERVICE.DROP_AI_MODEL('enhance_embed');
 call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('enhance_embed_ep');
 call DBMS_AI_SERVICE.CREATE_AI_MODEL(

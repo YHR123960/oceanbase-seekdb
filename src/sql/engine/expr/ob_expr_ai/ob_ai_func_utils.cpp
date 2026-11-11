@@ -61,6 +61,63 @@ int ObOpenAIUtils::ObOpenAIComplete::get_header(common::ObIAllocator &allocator,
   return ObOpenAIUtils::get_header(allocator, api_key, headers);
 }
 
+static int validate_openai_completion_config(ObJsonObject *config)
+{
+  int ret = OB_SUCCESS;
+  if (OB_NOT_NULL(config)) {
+    const ObJsonNode *temperature = config->get_value("temperature");
+    const ObJsonNode *max_tokens = config->get_value("max_tokens");
+    if (OB_NOT_NULL(config->get_value("model")) || OB_NOT_NULL(config->get_value("messages"))) {
+      ret = OB_INVALID_ARGUMENT;
+      LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_complete config cannot override model or messages");
+    } else if (OB_NOT_NULL(temperature) && temperature->json_type() != ObJsonNodeType::J_NULL) {
+      bool valid = false;
+      switch (temperature->json_type()) {
+        case ObJsonNodeType::J_INT:
+        case ObJsonNodeType::J_OINT:
+          valid = temperature->get_int() >= 0 && temperature->get_int() <= 2;
+          break;
+        case ObJsonNodeType::J_UINT:
+        case ObJsonNodeType::J_OLONG:
+          valid = temperature->get_uint() <= 2;
+          break;
+        case ObJsonNodeType::J_DECIMAL:
+        case ObJsonNodeType::J_ODECIMAL: {
+          const auto value = temperature->get_decimal_data();
+          valid = value.compare(int64_t{0}) >= 0 && value.compare(int64_t{2}) <= 0;
+          break;
+        }
+        case ObJsonNodeType::J_DOUBLE:
+        case ObJsonNodeType::J_ODOUBLE:
+        case ObJsonNodeType::J_OFLOAT: {
+          const double value = temperature->json_type() == ObJsonNodeType::J_OFLOAT
+              ? temperature->get_float() : temperature->get_double();
+          valid = std::isfinite(value) && value >= 0 && value <= 2;
+          break;
+        }
+        default:
+          break;
+      }
+      if (!valid) {
+        ret = OB_INVALID_ARGUMENT;
+        LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_complete temperature must be a number from 0 to 2");
+      }
+    }
+    if (OB_SUCC(ret) && OB_NOT_NULL(max_tokens) && max_tokens->json_type() != ObJsonNodeType::J_NULL) {
+      const auto type = max_tokens->json_type();
+      const bool valid = (type == ObJsonNodeType::J_INT || type == ObJsonNodeType::J_OINT)
+          ? max_tokens->get_int() > 0
+          : (type == ObJsonNodeType::J_UINT || type == ObJsonNodeType::J_OLONG)
+              && max_tokens->get_uint() > 0 && max_tokens->get_uint() <= static_cast<uint64_t>(INT64_MAX);
+      if (!valid) {
+        ret = OB_INVALID_ARGUMENT;
+        LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_complete max_tokens must be a positive signed 64-bit integer");
+      }
+    }
+  }
+  return ret;
+}
+
 int ObOpenAIUtils::ObOpenAIComplete::get_body(common::ObIAllocator &allocator,
                                               common::ObString &model,
                                               common::ObString &prompt,
@@ -71,6 +128,7 @@ int ObOpenAIUtils::ObOpenAIComplete::get_body(common::ObIAllocator &allocator,
   int ret = OB_SUCCESS;
   if (model.empty() || content.empty()) {
     ret = OB_INVALID_ARGUMENT;
+  } else if (OB_FAIL(validate_openai_completion_config(config))) {
   } else {
     // {"model": "*", "messages": [{"role": "system", "content": "*"}, {"role": "user", "content": "*"}]}
     ObJsonObject *body_obj = nullptr;
@@ -158,25 +216,34 @@ int ObOpenAIUtils::ObOpenAIComplete::set_config_json_format(common::ObIAllocator
   return ret;
 }
 
-int ObOpenAIUtils::ObOpenAIComplete::parse_output(common::ObIAllocator &allocator, 
+int ObOpenAIUtils::ObOpenAIComplete::parse_output(common::ObIAllocator &allocator,
                                                   common::ObJsonObject *http_response,
-                                                  common::ObIJsonBase *&result) 
+                                                  common::ObIJsonBase *&result)
 {
+  UNUSED(allocator);
   int ret = OB_SUCCESS;
+  result = nullptr;
+  ObJsonNode *choices = nullptr;
+  ObJsonNode *choice = nullptr;
+  ObJsonNode *message = nullptr;
+  ObJsonNode *content = nullptr;
   if (OB_ISNULL(http_response)) {
     ret = OB_INVALID_ARGUMENT;
+  } else if (OB_ISNULL(choices = http_response->get_value("choices")) ||
+             choices->json_type() != ObJsonNodeType::J_ARRAY ||
+             static_cast<ObJsonArray *>(choices)->element_count() == 0) {
+    ret = OB_INVALID_DATA;
+  } else if (OB_ISNULL(choice = static_cast<ObJsonArray *>(choices)->get_value(0)) ||
+             choice->json_type() != ObJsonNodeType::J_OBJECT) {
+    ret = OB_INVALID_DATA;
+  } else if (OB_ISNULL(message = static_cast<ObJsonObject *>(choice)->get_value("message")) ||
+             message->json_type() != ObJsonNodeType::J_OBJECT) {
+    ret = OB_INVALID_DATA;
+  } else if (OB_ISNULL(content = static_cast<ObJsonObject *>(message)->get_value("content")) ||
+             content->json_type() != ObJsonNodeType::J_STRING || content->get_data_length() == 0) {
+    ret = OB_INVALID_DATA;
   } else {
-    ObIJsonBase *j_tree = http_response;
-    common::ObString path_text("$.choices[0].message.content");
-    ObJsonPath j_path(path_text, &allocator);
-    ObJsonSeekResult hit;
-    if (OB_FAIL(j_path.parse_path())) {
-    } else if (OB_FAIL(j_tree->seek(j_path, j_path.path_node_cnt(), false, false, hit))) {
-    } else if (hit.size() == 0) {
-      ret = OB_INVALID_DATA;
-    } else {
-      result = hit[0];
-    }
+    result = content;
   }
   return ret;
 }
@@ -979,8 +1046,12 @@ int ObAIFuncJsonUtils::print_json_to_str(ObIAllocator &allocator, ObIJsonBase *b
 int ObAIFuncJsonUtils::get_json_object_form_str(ObIAllocator &allocator, ObString &str, ObJsonObject *&obj_node)
 {
   int ret = OB_SUCCESS;
+  obj_node = nullptr;
   ObIJsonBase *j_base = NULL;
   if (OB_FAIL(ObJsonBaseFactory::get_json_base(&allocator, str, ObJsonInType::JSON_TREE, ObJsonInType::JSON_TREE, j_base))) {
+  } else if (OB_ISNULL(j_base) || j_base->json_type() != ObJsonNodeType::J_OBJECT) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_USER_ERROR(OB_INVALID_ARGUMENT, "expected a JSON object");
   } else {
     obj_node = static_cast<ObJsonObject *>(j_base);
   }
@@ -1314,16 +1385,8 @@ int ObAIFuncModel::call_completion(ObString &prompt, ObJsonObject *config, ObStr
     result = result_str;
   }
   if (ret == OB_INVALID_DATA) {
-    ObString response_str;
-    if (OB_SUCCESS == ObAIFuncJsonUtils::print_json_to_str(*allocator_, response, response_str)) {
-      char http_message_str[1024];
-      snprintf(http_message_str, sizeof(http_message_str), "unexpected http message: %s", response_str.ptr());
-      ObString ob_http_message_str(http_message_str);
-      FORWARD_USER_ERROR(ret, ob_http_message_str.ptr());
-    } else {
-      FORWARD_USER_ERROR(ret, "unexpected http message");
-    }
-  } 
+    FORWARD_USER_ERROR(ret, "invalid completion response");
+  }
   return ret;
 }
 
