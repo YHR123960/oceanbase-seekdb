@@ -45,6 +45,8 @@ struct ObJsonNode {
   virtual uint64_t element_count() const { return 0; }
   virtual int get_array_element(uint64_t, ObJsonNode *&) const { return OB_INVALID_DATA; }
   double get_double() const { return number; }
+  virtual int64_t get_int() const { return 0; }
+  uint64_t get_uint() const { return 0; }
 };
 using ObIJsonBase = ObJsonNode;
 struct ObJsonInt : ObJsonNode {
