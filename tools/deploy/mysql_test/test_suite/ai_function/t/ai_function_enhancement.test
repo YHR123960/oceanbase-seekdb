@@ -124,6 +124,20 @@ call DBMS_AI_SERVICE.ALTER_AI_MODEL_ENDPOINT(
 select provider from oceanbase.DBA_OB_AI_MODEL_ENDPOINTS
  where endpoint_name = 'enhance_ollama_complete_ep';
 select length(ai_complete('enhance_ollama_complete', 'hello')) > 0 as ollama_complete_ok;
+call DBMS_AI_SERVICE.ALTER_AI_MODEL_ENDPOINT('enhance_ollama_complete_ep', '{"provider":"openai","access_key":"mock-key"}');
+call DBMS_AI_SERVICE.ALTER_AI_MODEL_ENDPOINT('enhance_ollama_complete_ep', '{"provider":"OLLAMA","access_key":null}');
+select provider, coalesce(length(access_key), 0) = 0 as no_key from oceanbase.DBA_OB_AI_MODEL_ENDPOINTS where endpoint_name = 'enhance_ollama_complete_ep';
+select length(ai_complete('enhance_ollama_complete', 'hello', json_object('temperature',0.5,'max_tokens',16))) > 0 as ollama_options_ok;
+--disable_query_log
+--disable_result_log
+--error 11116
+call DBMS_AI_SERVICE.ALTER_AI_MODEL_ENDPOINT('enhance_ollama_complete_ep', '{"provider":"not-a-provider"}');
+--error 11114
+call DBMS_AI_SERVICE.ALTER_AI_MODEL_ENDPOINT('enhance_ollama_complete_ep', null);
+--error 11114
+call DBMS_AI_SERVICE.ALTER_AI_MODEL_ENDPOINT('enhance_ollama_complete_ep', '{"provider":"openai","access_key":""}');
+--enable_result_log
+--enable_query_log
 
 --error 0,11118
 call DBMS_AI_SERVICE.DROP_AI_MODEL('enhance_ollama_embed');
@@ -132,7 +146,7 @@ call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('enhance_ollama_embed_ep');
 call DBMS_AI_SERVICE.CREATE_AI_MODEL(
   'enhance_ollama_embed', '{"type":"dense_embedding","model_name":"nomic-embed-text"}');
 call DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT(
-  'enhance_ollama_embed_ep', '{"ai_model_name":"enhance_ollama_embed","scope":"all","url":"http://0.0.0.0:8000/api/embed","access_key":"","provider":"OLLAMA"}');
+  'enhance_ollama_embed_ep', '{"ai_model_name":"enhance_ollama_embed","scope":"all","url":"http://0.0.0.0:8000/api/embed","provider":"OLLAMA"}');
 select json_valid(ai_embed('enhance_ollama_embed', 'hello')) as ollama_embed_ok;
 
 call DBMS_AI_SERVICE.DROP_AI_MODEL('enhance_complete');
@@ -145,3 +159,4 @@ call DBMS_AI_SERVICE.DROP_AI_MODEL('enhance_ollama_complete');
 call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('enhance_ollama_complete_ep');
 call DBMS_AI_SERVICE.DROP_AI_MODEL('enhance_ollama_embed');
 call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('enhance_ollama_embed_ep');
+select count(*) as ollama_endpoints_left from oceanbase.DBA_OB_AI_MODEL_ENDPOINTS where endpoint_name in ('enhance_ollama_complete_ep', 'enhance_ollama_embed_ep');

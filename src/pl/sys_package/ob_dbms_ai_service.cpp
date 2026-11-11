@@ -131,6 +131,7 @@ int ObDBMSAiService::alter_ai_model_endpoint(ObPLExecCtx &ctx, sql::ParamStore &
   int ret = OB_SUCCESS;
   ObString endpoint_name;
   query::ObIAiEndpointAdmin *endpoint_admin = ctx.ai_endpoint_admin_;
+  ctx.set_is_sensitive(true);
 
   if (OB_FAIL(precheck_version_and_param_count_(2, params))) {
   } else if (OB_FAIL(ObDBMSAiService::check_ai_model_privilege_(ctx, OB_PRIV_ALTER_AI_MODEL))) {

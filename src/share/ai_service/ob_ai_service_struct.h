@@ -74,7 +74,6 @@ public:
                K_(scope),
                K_(endpoint_id),
                K_(url),
-               K_(access_key),
                K_(ai_model_name),
                K_(provider),
                K_(request_model_name),

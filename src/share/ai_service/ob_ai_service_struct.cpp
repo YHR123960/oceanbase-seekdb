@@ -37,7 +37,8 @@ const char *VALID_PROVIDERS[] = {
   "SILICONFLOW",
   "COHERE",
   "HUNYUAN-OPENAI",
-  "OPENAI"
+  "OPENAI",
+  "OLLAMA"
 };
 
 #define EXTRACT_JSON_ELEM_STR(json_key, member) \
@@ -69,7 +70,7 @@ int ObAiModelEndpointInfo::parse_from_json_base(common::ObArenaAllocator &alloca
   name_ = name;
   if (OB_FAIL(merge_delta_endpoint(allocator, params_jbase))) {
   }
-  LOG_INFO("parse from json base", K(ret), K(params_jbase), K(params_jbase.json_type()), K(params_jbase.element_count()));
+  LOG_INFO("parse from json base", K(ret), K(params_jbase.json_type()), K(params_jbase.element_count()));
   return ret;
 }
 
@@ -112,16 +113,15 @@ int ObAiModelEndpointInfo::check_valid() const
   } else if (url_.empty()) {
     ret = OB_AI_FUNC_PARAM_EMPTY;
     LOG_USER_ERROR(OB_AI_FUNC_PARAM_EMPTY, strlen("url"), "url");
-  } else if (access_key_.empty()) {
-    ret = OB_AI_FUNC_PARAM_EMPTY;
-    LOG_USER_ERROR(OB_AI_FUNC_PARAM_EMPTY, strlen("access_key"), "access_key");
-    LOG_WARN("access_key is empty", K(ret), K(*this));
   } else if (provider_.empty()) {
     ret = OB_AI_FUNC_PARAM_EMPTY;
     LOG_USER_ERROR(OB_AI_FUNC_PARAM_EMPTY, strlen("provider"), "provider");
   } else if (!is_valid_provider(provider_)) {
     ret = OB_AI_FUNC_PARAM_VALUE_INVALID;
     LOG_USER_ERROR(OB_AI_FUNC_PARAM_VALUE_INVALID, strlen("provider"), "provider");
+  } else if (access_key_.empty() && provider_.case_compare("OLLAMA") != 0) {
+    ret = OB_AI_FUNC_PARAM_EMPTY;
+    LOG_USER_ERROR(OB_AI_FUNC_PARAM_EMPTY, strlen("access_key"), "access_key");
   } else if (!parameters_.empty()) {
     ret = OB_AI_FUNC_PARAM_VALUE_INVALID;
     LOG_USER_ERROR(OB_AI_FUNC_PARAM_VALUE_INVALID, strlen("parameters"), "parameters");
@@ -152,6 +152,7 @@ int ObAiModelEndpointInfo::merge_delta_endpoint(common::ObArenaAllocator &alloca
   int ret = OB_SUCCESS;
   JsonObjectIterator iter = delta_jbase.object_iterator();
   bool has_api_key = false;
+  bool null_api_key = false;
   while (!iter.end() && OB_SUCC(ret)) {
     ObJsonObjPair elem;
     if (OB_FAIL(iter.get_elem(elem))) {
@@ -159,7 +160,20 @@ int ObAiModelEndpointInfo::merge_delta_endpoint(common::ObArenaAllocator &alloca
       EXTRACT_JSON_ELEM_STR("scope", scope_)
       EXTRACT_JSON_ELEM_STR("ai_model_name", ai_model_name_)
       EXTRACT_JSON_ELEM_STR("url", url_)
-      EXTRACT_JSON_ELEM_STR_WITH_PROCESS("access_key", access_key_, has_api_key = true)
+      if (elem.first.case_compare("access_key") == 0) {
+        const auto type = elem.second->json_type();
+        null_api_key = type == ObJsonNodeType::J_NULL;
+        if (null_api_key) {
+          access_key_.reset();
+          has_api_key = true;
+        } else if (type == ObJsonNodeType::J_STRING) {
+          access_key_ = ObString(elem.second->get_data_length(), elem.second->get_data());
+          has_api_key = true;
+        } else {
+          ret = OB_AI_FUNC_PARAM_VALUE_INVALID;
+          LOG_USER_ERROR(OB_AI_FUNC_PARAM_VALUE_INVALID, elem.first.length(), elem.first.ptr());
+        }
+      } else
       EXTRACT_JSON_ELEM_STR("provider", provider_)
       EXTRACT_JSON_ELEM_STR("request_model_name", request_model_name_)
       EXTRACT_JSON_ELEM_STR("parameters", parameters_)
@@ -171,13 +185,16 @@ int ObAiModelEndpointInfo::merge_delta_endpoint(common::ObArenaAllocator &alloca
   }
 
   if (OB_SUCC(ret)) {
-    if (has_api_key && !access_key_.empty() && OB_FAIL(encrypt_access_key_(allocator, access_key_, access_key_))) {
+    if (null_api_key && provider_.case_compare("OLLAMA") != 0) {
+      ret = OB_AI_FUNC_PARAM_VALUE_INVALID;
+      LOG_USER_ERROR(OB_AI_FUNC_PARAM_VALUE_INVALID, strlen("access_key"), "access_key");
+    } else if (has_api_key && !access_key_.empty() && OB_FAIL(encrypt_access_key_(allocator, access_key_, access_key_))) {
       LOG_WARN("failed to encrypt access key", K(ret));
     } else if (OB_FAIL(check_valid())) {
     }
   }
 
-  LOG_INFO("merge delta endpoint", K(ret), K(delta_jbase), K(delta_jbase.json_type()), K(delta_jbase.element_count()));
+  LOG_INFO("merge delta endpoint", K(ret), K(delta_jbase.json_type()), K(delta_jbase.element_count()));
   return ret;
 }
 
