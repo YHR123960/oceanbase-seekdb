@@ -106,15 +106,8 @@ int ObUpdateResolver::resolve(const ParseNode &parse_tree)
     }
   }
 
-  if (OB_SUCC(ret)) {
-    // Parse cascading update columns
-    if (OB_FAIL(resolve_additional_assignments(tables_assign,
-                                               T_UPDATE_SCOPE))) {
-    }
-  }
-
-  // Include invalidated outputs in the regular UPDATE so index changes and
-  // result loss use the same storage transaction as the dependency update.
+  // Add invalidated outputs before resolving dependent assignments so vector
+  // index maintenance sees the same UPDATE as the stored result column.
   for (int64_t i = 0; OB_SUCC(ret) && i < tables_assign.count(); ++i) {
     ObTableAssignment &target = tables_assign.at(i);
     const TableItem *table_item = update_stmt->get_table_item_by_id(target.table_id_);
@@ -157,6 +150,13 @@ int ObUpdateResolver::resolve(const ParseNode &parse_tree)
           }
         }
       }
+    }
+  }
+
+  if (OB_SUCC(ret)) {
+    // Parse cascading update columns
+    if (OB_FAIL(resolve_additional_assignments(tables_assign,
+                                               T_UPDATE_SCOPE))) {
     }
   }
 
