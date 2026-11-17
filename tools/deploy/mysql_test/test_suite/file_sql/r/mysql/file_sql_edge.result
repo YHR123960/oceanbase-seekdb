@@ -8,6 +8,9 @@ id	note
 3	ok
 active	n	total
 1	2	4
+# Parenthesized file tables still scan data
+id
+2
 # COPY table, CSV dialect, NULL and exclusion of existing targets
 id	note
 1	x|y

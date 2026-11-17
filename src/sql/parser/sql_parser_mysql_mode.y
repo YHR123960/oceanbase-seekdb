@@ -10936,6 +10936,7 @@ NAME_OB '(' STRING_VALUE file_table_args ')' file_table_alias
   ParseNode *options = NULL;
   merge_nodes(options, result, T_EXPR_LIST, $4);
   malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE, 4, $1, $3, options, $6);
+  $$->value_ = 0;
 }
 ;
 
@@ -12383,7 +12384,14 @@ explain_or_desc relation_factor opt_desc_column_option
       && project != NULL && project->num_child_ == 1
       && project->children_[0]->num_child_ == 1
       && project->children_[0]->children_[0]->type_ == T_STAR) {
-    from->children_[0]->value_ = 1;
+    ParseNode *table = from->children_[0];
+    ParseNode *description = NULL;
+    /* Table parentheses also use value_. Keep the DESCRIBE marker separate. */
+    malloc_non_terminal_node(description, result->malloc_pool_, T_FILE_TABLE, 5,
+                             table->children_[0], table->children_[1],
+                             table->children_[2], table->children_[3], $1);
+    description->value_ = table->value_;
+    from->children_[0] = description;
     $$ = query;
   } else {
     GEN_EXPLAN_STMT($1, $$, 0, 0, query, NULL, NULL);

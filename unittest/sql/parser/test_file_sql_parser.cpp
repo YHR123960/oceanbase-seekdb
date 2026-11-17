@@ -53,6 +53,7 @@ TEST_F(FileSqlParserTest, FileTableAliasAndNamedLiterals)
   ASSERT_EQ(T_SELECT, query->type_);
   const ParseNode *table = query->children_[PARSE_SELECT_FROM]->children_[0];
   ASSERT_EQ(T_FILE_TABLE, table->type_);
+  EXPECT_EQ(4, table->num_child_);
   EXPECT_STREQ("read_csv", table->children_[0]->str_value_);
   EXPECT_STREQ("/data/f.csv", table->children_[1]->str_value_);
   ASSERT_NE(nullptr, table->children_[2]);
@@ -75,8 +76,14 @@ TEST_F(FileSqlParserTest, DescribeFileAndOrdinaryExplain)
   ASSERT_EQ(T_SELECT, desc->type_);
   const ParseNode *table = desc->children_[PARSE_SELECT_FROM]->children_[0];
   ASSERT_EQ(T_FILE_TABLE, table->type_);
-  EXPECT_EQ(1, table->value_);
+  ASSERT_EQ(5, table->num_child_);
+  EXPECT_NE(nullptr, table->children_[4]);
   EXPECT_TRUE(table->children_[2] == nullptr || table->children_[2]->num_child_ == 0);
+  const ParseNode *grouped = parse("SELECT id FROM (read_csv('/data/f.csv'))");
+  ASSERT_NE(nullptr, grouped);
+  const ParseNode *grouped_table = grouped->children_[PARSE_SELECT_FROM]->children_[0];
+  ASSERT_EQ(T_FILE_TABLE, grouped_table->type_);
+  EXPECT_EQ(4, grouped_table->num_child_);
   const ParseNode *explain = parse("EXPLAIN SELECT * FROM read_csv('/data/f.csv')");
   ASSERT_NE(nullptr, explain);
   EXPECT_EQ(T_EXPLAIN, explain->type_);

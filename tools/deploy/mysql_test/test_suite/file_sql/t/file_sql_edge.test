@@ -20,6 +20,9 @@ eval select active, count(*) as n, sum(id) as total
        from read_csv('$FILE_SQL_DATA_DIR/basic.csv')
        group by active having count(*) > 1 order by active;
 
+--echo # Parenthesized file tables still scan data
+eval select id from (read_csv('$FILE_SQL_DATA_DIR/basic.csv')) where id = 2;
+
 --echo # COPY table, CSV dialect, NULL and exclusion of existing targets
 create table file_sql_copy_source (id int, note varchar(80));
 insert into file_sql_copy_source values (1, 'x|y'), (2, null);

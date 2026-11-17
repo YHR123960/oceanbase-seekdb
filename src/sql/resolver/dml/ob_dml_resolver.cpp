@@ -3958,7 +3958,7 @@ int ObDMLResolver::resolve_file_table(const ParseNode &node, TableItem *&item)
     else ret = OB_ERR_PARSER_SYNTAX;
   }
   if (OB_SUCC(ret)) {
-    spec.describe = node.value_ != 0;
+    spec.describe = node.num_child_ == 5 && node.children_[4] != nullptr;
     spec.path.assign(path->str_value_, path->str_len_);
     OZ (get_file_sql_root(*session_info_, *allocator_, root));
     std::set<std::string> seen;
