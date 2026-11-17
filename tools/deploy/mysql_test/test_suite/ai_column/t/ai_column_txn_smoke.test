@@ -1,0 +1,72 @@
+# Queue rows and data mutations must share the same transaction.
+--disable_query_log
+CREATE DATABASE ai_column_txn_smoke;
+CALL DBMS_AI_SERVICE.CREATE_AI_MODEL('txn_smoke_model',
+  '{"type":"completion","model_name":"mock-complete"}');
+CREATE TABLE ai_column_txn_smoke.docs (
+  id BIGINT PRIMARY KEY, title VARCHAR(40), body VARCHAR(40),
+  result VARCHAR(80) AI COLUMN (AI_COMPLETE('txn_smoke_model', body)),
+  label VARCHAR(80) AI COLUMN (AI_COMPLETE('txn_smoke_model', CONCAT('Label: ', body)))
+);
+SET @table_id = (
+  SELECT t.table_id FROM oceanbase.__all_table t
+  JOIN oceanbase.__all_database d ON d.database_id = t.database_id
+  WHERE t.table_name = 'docs' AND d.database_name = 'ai_column_txn_smoke'
+);
+connect (reader,localhost,root,,test);
+connection reader;
+SET @reader_table_id = (
+  SELECT t.table_id FROM oceanbase.__all_table t
+  JOIN oceanbase.__all_database d ON d.database_id = t.database_id
+  WHERE t.table_name = 'docs' AND d.database_name = 'ai_column_txn_smoke'
+);
+connection default;
+START TRANSACTION;
+INSERT INTO ai_column_txn_smoke.docs (id, title, body) VALUES (1, 'title', 'body');
+SELECT COUNT(*) = 2 AND COUNT(DISTINCT request_id) = 1 AS grouped_transaction_tasks
+FROM oceanbase.__all_ai_column_task WHERE table_id = @table_id;
+connection reader;
+SELECT COUNT(*) = 0 AS other_session_cannot_see_uncommitted
+FROM oceanbase.__all_ai_column_task WHERE table_id = @reader_table_id;
+connection default;
+ROLLBACK;
+SELECT COUNT(*) = 0 AS rollback_removes_queue
+FROM oceanbase.__all_ai_column_task WHERE table_id = @table_id;
+SELECT COUNT(*) = 0 AS rollback_removes_data FROM ai_column_txn_smoke.docs;
+
+START TRANSACTION;
+INSERT INTO ai_column_txn_smoke.docs (id, title, body) VALUES (1, 'title', 'body'),(2, 'title', 'body');
+COMMIT;
+connection reader;
+SELECT COUNT(*) = 4 AND COUNT(DISTINCT request_id) = 2 AS commit_keeps_queue
+FROM oceanbase.__all_ai_column_task WHERE table_id = @reader_table_id;
+disconnect reader;
+connection default;
+SET @request_id = (
+  SELECT MIN(request_id) FROM oceanbase.__all_ai_column_task
+  WHERE table_id = @table_id AND rowkey_predicate = '`id` = 1'
+);
+UPDATE ai_column_txn_smoke.docs SET title = 'changed' WHERE id = 1;
+SELECT COUNT(*) = 2 AS unrelated_update_keeps_request
+FROM oceanbase.__all_ai_column_task WHERE table_id = @table_id AND request_id = @request_id;
+UPDATE ai_column_txn_smoke.docs SET body = 'changed' WHERE id = 1;
+SELECT COUNT(*) = 2 AND COUNT(DISTINCT request_id) = 1 AS dependency_update_replaces_request
+FROM oceanbase.__all_ai_column_task WHERE table_id = @table_id
+  AND rowkey_predicate = '`id` = 1' AND request_id <> @request_id;
+UPDATE ai_column_txn_smoke.docs SET id = 3 WHERE id = 1;
+SELECT COUNT(*) = 0 AS old_key_tasks_removed
+FROM oceanbase.__all_ai_column_task WHERE table_id = @table_id AND rowkey_predicate = '`id` = 1';
+SELECT COUNT(*) = 2 AS new_key_tasks_created
+FROM oceanbase.__all_ai_column_task WHERE table_id = @table_id AND rowkey_predicate = '`id` = 3';
+START TRANSACTION;
+DELETE FROM ai_column_txn_smoke.docs WHERE id = 3;
+SELECT COUNT(*) = 0 AS delete_removes_tasks
+FROM oceanbase.__all_ai_column_task WHERE table_id = @table_id AND rowkey_predicate = '`id` = 3';
+ROLLBACK;
+SELECT COUNT(*) = 2 AS delete_rollback_restores_tasks
+FROM oceanbase.__all_ai_column_task WHERE table_id = @table_id AND rowkey_predicate = '`id` = 3';
+DELETE FROM ai_column_txn_smoke.docs;
+SELECT COUNT(*) = 0 AS delete_removes_all_tasks
+FROM oceanbase.__all_ai_column_task WHERE table_id = @table_id;
+DROP DATABASE ai_column_txn_smoke;
+CALL DBMS_AI_SERVICE.DROP_AI_MODEL('txn_smoke_model');

@@ -112,6 +112,45 @@ int ObUpdateResolver::resolve(const ParseNode &parse_tree)
     }
   }
 
+  // Include invalidated outputs in the regular UPDATE so index changes and
+  // result loss use the same storage transaction as the dependency update.
+  for (int64_t i = 0; OB_SUCC(ret) && i < tables_assign.count(); ++i) {
+    ObTableAssignment &target = tables_assign.at(i);
+    const TableItem *table_item = update_stmt->get_table_item_by_id(target.table_id_);
+    const ObTableSchema *schema = nullptr;
+    if (table_item != nullptr && table_item->is_basic_table()
+        && OB_FAIL(schema_checker_->get_table_schema(table_item->ref_id_, schema))) {
+    }
+    if (OB_SUCC(ret) && schema != nullptr && schema->is_user_table()) {
+      const int64_t assignments = target.assignments_.count();
+      for (auto it = schema->column_begin(); OB_SUCC(ret) && it != schema->column_end(); ++it) {
+        const ObColumnSchemaV2 &column = **it;
+        bool invalidate = false;
+        if (column.is_ai_column()) {
+          for (int64_t j = 0; !invalidate && j < assignments; ++j) {
+            const uint64_t id = target.assignments_.at(j).column_expr_->get_column_id();
+            const ObColumnSchemaV2 *updated = schema->get_column_schema(id);
+            invalidate = column.has_cascaded_column_id(id) || (updated != nullptr && updated->is_rowkey_column());
+          }
+        }
+        if (invalidate) {
+          ColumnItem *item = nullptr;
+          ObAssignment reset;
+          if (OB_FAIL(resolve_basic_column_item(*table_item, column.get_column_name_str(), false, item))) {
+          } else if (OB_ISNULL(item)) {
+            ret = OB_ERR_UNEXPECTED;
+          } else if (OB_FAIL(ObRawExprUtils::build_null_expr(*params_.expr_factory_, reset.expr_))) {
+          } else if (OB_FAIL(add_additional_function_according_to_type(item, reset.expr_, T_UPDATE_SCOPE, true))) {
+          } else {
+            reset.column_expr_ = item->expr_;
+            reset.is_implicit_ = true;
+            ret = target.assignments_.push_back(reset);
+          }
+        }
+      }
+    }
+  }
+
   //add column for table scan, keep rowkey column in the head
   if (OB_SUCC(ret)) {
     for (int64_t i = 0; OB_SUCC(ret) && i < tables_assign.count(); i++) {
