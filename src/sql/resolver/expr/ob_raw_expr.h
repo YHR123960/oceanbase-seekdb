@@ -3067,6 +3067,7 @@ public:
   void set_table_part_key_org_column() { column_flags_ |= TABLE_PART_KEY_COLUMN_ORG_FLAG; }
   void set_vec_pq_cids_column() { column_flags_ |= GENERATED_VEC_IVF_PQ_CENTER_IDS_COLUMN_FLAG; }
   inline uint64_t get_column_flags() const { return column_flags_; }
+  inline bool is_ai_column() const { return (column_flags_ & AI_COLUMN_FLAG) != 0; }
   inline const ObRawExpr *get_dependant_expr() const { return dependant_expr_; }
   inline ObRawExpr *&get_dependant_expr() { return dependant_expr_; }
   inline void set_dependant_expr(ObRawExpr *expr) { dependant_expr_ = expr; }

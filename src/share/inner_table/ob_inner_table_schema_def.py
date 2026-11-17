@@ -342,7 +342,9 @@ all_column_def = dict(
       ('sub_data_type', 'int', 'false', '0'),
       ('skip_index_attr', 'int', 'false', '0'),
       ('lob_chunk_size', 'int', 'false', 'OB_DEFAULT_LOB_CHUNK_SIZE'),
-      ('local_session_vars', 'longtext', 'true')
+      ('local_session_vars', 'longtext', 'true'),
+      ('ai_column_expression', 'varchar:OB_MAX_DEFAULT_VALUE_LENGTH', 'true'),
+      ('ai_column_max_retries', 'int', 'false', '0')
   ]
   )
 
@@ -13863,6 +13865,41 @@ def_table_schema(
       FETCH_LSN,
       FETCH_SCN
     FROM oceanbase.__all_virtual_change_stream_refresh_stat
+  """.replace("\n", " ")
+)
+
+def_table_schema(
+  owner = 'seekdb',
+  table_name = '__all_ai_column',
+  table_id = '21701',
+  table_type = 'SYSTEM_VIEW',
+  gm_columns = [],
+  rowkey_columns = [],
+  normal_columns = [],
+  view_definition = """
+    SELECT col.table_id, col.column_id, col.column_name, col.schema_version AS definition_version,
+           'async' AS sync_mode, col.ai_column_max_retries AS max_retries,
+           col.ai_column_expression AS normalized_expr,
+           state_col.column_id AS state_column_id,
+           request_col.column_id AS request_column_id,
+           spec_col.column_id AS result_spec_column_id
+    FROM oceanbase.__all_column col
+    JOIN oceanbase.__all_table t ON t.table_id = col.table_id AND t.table_type = 3
+    JOIN oceanbase.__all_database d ON d.database_id = t.database_id
+    LEFT JOIN oceanbase.__all_column state_col
+      ON state_col.table_id = col.table_id AND state_col.is_hidden = 1
+         AND (state_col.column_flags & 32) = 32 AND state_col.comment = col.column_name
+         AND LEFT(state_col.column_name, 14) = '__ob_ai_state_'
+    LEFT JOIN oceanbase.__all_column request_col
+      ON request_col.table_id = col.table_id AND request_col.is_hidden = 1
+         AND (request_col.column_flags & 32) = 32 AND request_col.comment = col.column_name
+         AND LEFT(request_col.column_name, 16) = '__ob_ai_request_'
+    LEFT JOIN oceanbase.__all_column spec_col
+      ON spec_col.table_id = col.table_id AND spec_col.is_hidden = 1
+         AND (spec_col.column_flags & 32) = 32 AND spec_col.comment = col.column_name
+         AND LEFT(spec_col.column_name, 13) = '__ob_ai_spec_'
+    WHERE (col.column_flags & 16) = 16 AND col.is_hidden = 0
+      AND d.in_recyclebin = 0 AND 0 = sys_privilege_check('db_acc', d.database_name)
   """.replace("\n", " ")
 )
 

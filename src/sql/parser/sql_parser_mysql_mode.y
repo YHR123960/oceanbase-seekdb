@@ -373,6 +373,7 @@ END_P SET_VAR DELIMITER
 //-----------------------------non_reserved keyword end---------------------------------------------
 %type <node> sql_stmt stmt_list stmt opt_end_p
 %type <node> file_table_expr file_table_args file_table_alias
+%type <node> ai_column_options ai_column_option_list ai_column_option ai_column_call ai_column_third_arg
 %type <node> file_copy_stmt file_copy_options file_copy_list file_copy_option file_copy_target
 %type <node> select_stmt update_stmt delete_stmt
 %type <node> insert_stmt single_table_insert values_clause dml_table_name
@@ -4852,6 +4853,17 @@ column_definition_ref data_type opt_column_attribute_list opt_column_reference o
   merge_nodes(attributes, result, T_COLUMN_ATTRIBUTES, $10);
   malloc_non_terminal_node($$, result->malloc_pool_, T_COLUMN_DEFINITION, 7, $1, $2, attributes, $7, $9, $12, $4);
 }
+| column_definition_ref data_type AI COLUMN '(' ai_column_call ')' ai_column_options opt_position_column
+{
+  ParseNode *expr = $6->children_[0];
+  ParseNode *definition = NULL;
+  dup_expr_string(expr, result, @6.first_column, @6.last_column);
+  malloc_non_terminal_node(definition, result->malloc_pool_, T_AI_COLUMN_DEFINITION, 5,
+                           expr, $8, $6->children_[1], $6->children_[2], $6->children_[3]);
+  ParseNode *attributes = NULL;
+  set_data_type_collation($2, attributes, false, true);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_COLUMN_DEFINITION, 5, $1, $2, NULL, $9, definition);
+}
 | column_definition_ref SERIAL opt_column_attribute_list opt_position_column 
 {
   ParseNode *unsigned_bigint_type = NULL;
@@ -4877,6 +4889,62 @@ column_definition_ref data_type opt_column_attribute_list opt_column_reference o
   malloc_non_terminal_node(attributes, result->malloc_pool_, T_LINK_NODE, 2, attributes, unique_attr);
   merge_nodes(attributes, result, T_COLUMN_ATTRIBUTES, attributes);
   malloc_non_terminal_node($$, result->malloc_pool_, T_COLUMN_DEFINITION, 4, $1, unsigned_bigint_type, attributes, $4);
+}
+;
+
+ai_column_call:
+function_name '(' expr ',' expr ai_column_third_arg ')'
+{
+  ParseNode *model_sql = NULL;
+  ParseNode *input_sql = NULL;
+  ParseNode *args = NULL;
+  ParseNode *expr = NULL;
+  malloc_terminal_node(model_sql, result->malloc_pool_, T_VARCHAR);
+  malloc_terminal_node(input_sql, result->malloc_pool_, T_VARCHAR);
+  dup_expr_string(model_sql, result, @3.first_column, @3.last_column);
+  dup_expr_string(input_sql, result, @5.first_column, @5.last_column);
+  if ($6 == NULL) {
+    malloc_non_terminal_node(args, result->malloc_pool_, T_EXPR_LIST, 2, $3, $5);
+  } else {
+    malloc_non_terminal_node(args, result->malloc_pool_, T_EXPR_LIST, 3, $3, $5, $6->children_[0]);
+  }
+  malloc_non_terminal_node(expr, result->malloc_pool_, T_FUN_SYS, 2, $1, args);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_EXPR_LIST, 4,
+                           expr, model_sql, input_sql, $6 == NULL ? NULL : $6->children_[1]);
+}
+;
+
+ai_column_third_arg:
+/* empty */ { $$ = NULL; }
+| ',' expr
+{
+  ParseNode *arg_sql = NULL;
+  malloc_terminal_node(arg_sql, result->malloc_pool_, T_VARCHAR);
+  dup_expr_string(arg_sql, result, @2.first_column, @2.last_column);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_EXPR_LIST, 2, $2, arg_sql);
+}
+;
+
+ai_column_options:
+/* empty */ { $$ = NULL; }
+| WITH '(' ai_column_option_list ')'
+{
+  merge_nodes($$, result, T_EXPR_LIST, $3);
+}
+;
+
+ai_column_option_list:
+ai_column_option { $$ = $1; }
+| ai_column_option_list ',' ai_column_option
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
+}
+;
+
+ai_column_option:
+relation_name COMP_EQ signed_literal
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_EXPR_LIST, 2, $1, $3);
 }
 ;
 
@@ -12776,6 +12844,14 @@ SHOW opt_extended_or_full TABLES opt_from_or_in_database_clause opt_show_conditi
   malloc_terminal_node($$, result->malloc_pool_, T_INT);
   $$->value_ = $2[0];
   malloc_non_terminal_node($$, result->malloc_pool_, T_SHOW_COLUMNS, 4, $$, $5, $6, $7);
+}
+| SHOW AI COLUMNS from_or_in relation_factor opt_from_or_in_database_clause opt_show_condition
+{
+  (void)$4;
+  ParseNode *mode = NULL;
+  malloc_terminal_node(mode, result->malloc_pool_, T_INT);
+  mode->value_ = 4;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_SHOW_COLUMNS, 4, mode, $5, $6, $7);
 }
 | SHOW TABLE STATUS opt_from_or_in_database_clause opt_show_condition
 { malloc_non_terminal_node($$, result->malloc_pool_, T_SHOW_TABLE_STATUS, 2, $4, $5); }

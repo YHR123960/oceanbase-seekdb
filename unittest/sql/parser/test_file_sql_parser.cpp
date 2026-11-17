@@ -110,5 +110,46 @@ TEST_F(FileSqlParserTest, CopyTargetsAndOptions)
   EXPECT_EQ(nullptr, parse("SELECT * FROM read_csv('/data/f.csv', 'xml')"));
 }
 
+TEST_F(FileSqlParserTest, AiColumnDefinitionPreservesExpressionAndOptions)
+{
+  const ParseNode *stmt = parse(
+      "CREATE TABLE t (id BIGINT PRIMARY KEY, text VARCHAR(200), "
+      "tags JSON AI COLUMN (AI_COMPLETE('model', concat('tag: ', text))) "
+      "WITH (sync_mode='async', max_retries=2))");
+  ASSERT_NE(nullptr, stmt);
+  ASSERT_EQ(T_CREATE_TABLE, stmt->type_);
+  const ParseNode *elements = stmt->children_[3];
+  ASSERT_NE(nullptr, elements);
+  ASSERT_EQ(3, elements->num_child_);
+  const ParseNode *column = elements->children_[2];
+  ASSERT_EQ(T_COLUMN_DEFINITION, column->type_);
+  ASSERT_EQ(5, column->num_child_);
+  const ParseNode *ai = column->children_[4];
+  ASSERT_NE(nullptr, ai);
+  ASSERT_EQ(T_AI_COLUMN_DEFINITION, ai->type_);
+  ASSERT_EQ(T_FUN_SYS, ai->children_[0]->type_);
+  EXPECT_STREQ("AI_COMPLETE('model', concat('tag: ', text))", ai->children_[0]->str_value_);
+  ASSERT_NE(nullptr, ai->children_[1]);
+  ASSERT_EQ(2, ai->children_[1]->num_child_);
+  const ParseNode *retries = ai->children_[1]->children_[1];
+  EXPECT_STREQ("max_retries", retries->children_[0]->str_value_);
+  EXPECT_EQ(2, retries->children_[1]->value_);
+}
+
+TEST_F(FileSqlParserTest, AiColumnAlterAndOrdinaryAiIdentifier)
+{
+  const ParseNode *stmt = parse("ALTER TABLE t ADD COLUMN e VECTOR(4) AI COLUMN (AI_EMBED('m', body))");
+  ASSERT_NE(nullptr, stmt);
+  EXPECT_EQ(T_ALTER_TABLE, stmt->type_);
+  const ParseNode *show = parse("SHOW AI COLUMNS FROM app.t LIKE 'e'");
+  ASSERT_NE(nullptr, show);
+  ASSERT_EQ(T_SHOW_COLUMNS, show->type_);
+  EXPECT_EQ(4, show->children_[0]->value_);
+  const ParseNode *ordinary = parse("CREATE TABLE t (ai INT, body VARCHAR(20))");
+  ASSERT_NE(nullptr, ordinary);
+  EXPECT_EQ(4, ordinary->children_[3]->children_[0]->num_child_);
+  EXPECT_EQ(nullptr, parse("CREATE TABLE t (value INT AI COLUMN (AI_COMPLETE('m', 'text')) WITH ())"));
+}
+
 } // namespace
 } // namespace oceanbase::sql

@@ -1045,7 +1045,7 @@ int ObSchemaRetrieveUtils::fill_column_schema(const bool check_deleted, T &resul
       ret = fill_column_schema_default_value<T>(result, column, default_type);
     }
 
-    if (OB_SUCC(ret) && (column.is_enum_or_set() || column.is_collection())) {
+    if (OB_SUCC(ret) && (column.is_enum_or_set() || column.is_collection() || column.is_ai_column())) {
       ObString extend_type_info;
       EXTRACT_VARCHAR_FIELD_MYSQL(result, "extended_type_info", extend_type_info);
       int64_t pos = 0;
@@ -1054,6 +1054,16 @@ int ObSchemaRetrieveUtils::fill_column_schema(const bool check_deleted, T &resul
         SHARE_SCHEMA_LOG(WARN, "extend_type_info is empty", K(ret));
       } else if (OB_FAIL(column.deserialize_extended_type_info(extend_type_info.ptr(), extend_type_info.length(), pos))) {
       } else {}
+    }
+
+    if (OB_SUCC(ret) && column.is_ai_column()) {
+      ObString expression;
+      int64_t max_retries = 0;
+      EXTRACT_VARCHAR_FIELD_MYSQL(result, "ai_column_expression", expression);
+      EXTRACT_INT_FIELD_MYSQL(result, "ai_column_max_retries", max_retries, int64_t);
+      if (OB_SUCC(ret)) {
+        ret = column.set_ai_column_definition(expression, max_retries);
+      }
     }
 
     if (OB_SUCC(ret) && column.is_generated_column()) {

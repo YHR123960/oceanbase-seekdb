@@ -3170,7 +3170,7 @@ int ObTableSqlService::gen_column_dml_without_check(
       cur_default_value.reset();
     }
     ObString bin_extended_type_info;
-    if (OB_SUCC(ret) && (column.is_enum_or_set() || column.is_collection())) {
+    if (OB_SUCC(ret) && (column.is_enum_or_set() || column.is_collection() || column.is_ai_column())) {
       int64_t pos = 0;
       extended_type_info_buf = static_cast<char *>(allocator.alloc(OB_MAX_VARBINARY_LENGTH));
       if (OB_ISNULL(extended_type_info_buf)) {
@@ -3183,6 +3183,11 @@ int ObTableSqlService::gen_column_dml_without_check(
     ObString local_session_var;
     if (OB_SUCC(ret) && column.is_generated_column()
         && OB_FAIL(column.get_local_session_var().gen_local_session_var_str(allocator, local_session_var))) {
+    }
+    // Column inserts can share one SQL batch, so each row must have the same catalog fields.
+    if (OB_SUCC(ret)
+        && (OB_FAIL(dml.add_column("ai_column_expression", ObHexEscapeSqlStr(column.get_ai_column_expression())))
+            || OB_FAIL(dml.add_column("ai_column_max_retries", column.get_ai_column_max_retries())))) {
     }
     if (OB_SUCC(ret) && (OB_FAIL(dml.add_pk_column("table_id", ObSchemaUtils::get_extract_schema_id(
                                                     column.get_table_id())))

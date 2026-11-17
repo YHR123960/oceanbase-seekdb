@@ -235,6 +235,12 @@ int assign(const ObColumnSchemaV2 &src_schema);
   // false: generated columns or ROWID column
   inline bool is_column_stored_in_sstable() const
   { return !(is_virtual_generated_column() && !is_heap_alter_rowkey_column()); }
+  inline bool is_ai_column() const { return column_flags_ & AI_COLUMN_FLAG; }
+  inline const common::ObString &get_ai_column_expression() const { return ai_column_expression_; }
+  inline int64_t get_ai_column_max_retries() const { return ai_column_max_retries_; }
+  inline const common::ObString &get_ai_column_source() const { return ai_column_source_; }
+  int set_ai_column_definition(const common::ObString &expression, int64_t max_retries);
+  int set_ai_column_source(const common::ObString &source) { return deep_copy_str(source, ai_column_source_); }
   inline bool is_virtual_generated_column() const { return column_flags_ & VIRTUAL_GENERATED_COLUMN_FLAG; }
   inline bool is_stored_generated_column() const { return column_flags_ & STORED_GENERATED_COLUMN_FLAG; }
   inline bool is_cte_generated_column() const { return column_flags_ & CTE_GENERATED_COLUMN_FLAG; }
@@ -380,6 +386,9 @@ private:
   common::ObObj cur_default_value_; //collation must be same with the column
   common::ObString column_name_;
   common::ObString comment_;
+  common::ObString ai_column_expression_;
+  common::ObString ai_column_source_;
+  int64_t ai_column_max_retries_;
   common::ObArrayHelper<common::ObString> extended_type_info_;//used for enum and set
   uint64_t prev_column_id_;
   uint64_t next_column_id_;

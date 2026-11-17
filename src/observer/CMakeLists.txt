@@ -102,6 +102,18 @@ target_link_libraries(seekdb PRIVATE
   $<$<PLATFORM_ID:Linux>:-static-libstdc++>
   ${link_malloc_hook})
 
+option(SEEKDB_AI_COLUMN_TESTS "Build AI column schema tests" OFF)
+if(SEEKDB_AI_COLUMN_TESTS AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  set(AI_COLUMN_VENDOR_DEPS "${PROJECT_SOURCE_DIR}/deps/3rd/usr/local/oceanbase/deps/devel")
+  add_executable(test_ai_column_schema EXCLUDE_FROM_ALL
+    "${PROJECT_SOURCE_DIR}/unittest/share/schema/test_ai_column_schema.cpp")
+  target_include_directories(test_ai_column_schema SYSTEM PRIVATE "${AI_COLUMN_VENDOR_DEPS}/include")
+  target_link_libraries(test_ai_column_schema PRIVATE
+    -Wl,--start-group ob_malloc oceanbase_static ob_sql_static ob_storage_static ob_share_static sql_nio -Wl,--end-group
+    "${AI_COLUMN_VENDOR_DEPS}/lib/libgtest_main.a" "${AI_COLUMN_VENDOR_DEPS}/lib/libgtest.a"
+    -static-libgcc -static-libstdc++ ${link_malloc_hook})
+endif()
+
 if(ENABLE_SANITY)
   target_link_options(seekdb PRIVATE ${SEEKDB_SANITY_WRAP_LINK_OPTIONS})
   if(NOT OB_SO_CACHE)

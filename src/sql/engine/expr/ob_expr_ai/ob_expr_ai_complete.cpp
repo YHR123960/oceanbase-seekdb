@@ -160,6 +160,22 @@ int ObExprAIComplete::eval_ai_complete(const ObExpr &expr,
       res.set_null();
     }
 
+    // A typed AI column supplies the instruction in a separate provider message.
+    ObString system_prompt;
+    const ObString system_prompt_key("__ob_ai_column_system_prompt");
+    const ObJsonNode *prompt_node = OB_SUCC(ret) && config != nullptr ? config->get_value(system_prompt_key) : nullptr;
+    if (prompt_node != nullptr) {
+      if (prompt_node->json_type() != ObJsonNodeType::J_STRING || prompt_node->get_data_length() == 0) {
+        ret = OB_INVALID_ARGUMENT;
+        LOG_USER_ERROR(OB_INVALID_ARGUMENT, "AI COLUMN system prompt");
+      } else {
+        const ObString prompt_value(prompt_node->get_data_length(), prompt_node->get_data());
+        if (OB_FAIL(ob_write_string(temp_allocator, prompt_value, system_prompt))) {
+        } else if (OB_FAIL(config->remove(system_prompt_key))) {
+        }
+      }
+    }
+
     if (OB_FAIL(ret)){
     } else if (OB_FAIL(ObAIFuncUtils::get_ai_func_info(temp_allocator, model_id, info))) {
     } else if (OB_ISNULL(endpoint_resolver)) {
@@ -169,7 +185,7 @@ int ObExprAIComplete::eval_ai_complete(const ObExpr &expr,
     } else {
       ObAIFuncModel model(temp_allocator, *info, *endpoint_info);
       ObString result;
-      if (OB_FAIL(model.call_completion(prompt, config, result))) {
+      if (OB_FAIL(model.call_completion(prompt, config, result, system_prompt))) {
       } else if (OB_FAIL(ObAIFuncUtils::set_string_result(expr, ctx, res, result))) {
       }
     }

@@ -129,7 +129,10 @@ int ObDelUpdResolver::resolve_assignments(const ParseNode &parse_node,
         ObRawExpr *expr = value_list.at(i);
         bool is_generated_column = true;
         // Mysql only allows updating generated columns to their default value
-        if (OB_FAIL(check_basic_column_generated(ref_expr, stmt, is_generated_column))) {
+        if (ref_expr->is_ai_column()) {
+          ret = OB_NOT_SUPPORTED;
+          LOG_USER_ERROR(OB_NOT_SUPPORTED, "direct writes to an AI COLUMN");
+        } else if (OB_FAIL(check_basic_column_generated(ref_expr, stmt, is_generated_column))) {
         } else {
           if (T_DEFAULT == expr->get_expr_type()) {
             ObDefaultValueUtils utils(stmt, &params_, this);
@@ -2158,6 +2161,9 @@ int ObDelUpdResolver::resolve_insert_columns(const ParseNode *node,
         ret = OB_ERR_UNEXPECTED;
       } else if (FALSE_IT(column_expr = static_cast<ObColumnRefRawExpr*>(ref_expr))) {
         //do nothing
+      } else if (column_expr->is_ai_column()) {
+        ret = OB_NOT_SUPPORTED;
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, "direct writes to an AI COLUMN");
       } else if (OB_FAIL(check_insert_column_duplicate(column_expr->get_column_id(), is_duplicate))) {
       } else if (is_duplicate) {
         ret = OB_ERR_FIELD_SPECIFIED_TWICE;
@@ -2194,7 +2200,9 @@ int ObDelUpdResolver::resolve_insert_columns(const ParseNode *node,
       for (int64_t i = 0; OB_SUCC(ret) && i < N; i++) {
         uint64_t column_id = column_items.at(i).column_id_;
         bool is_duplicate = false;
-        if (OB_FAIL(check_insert_column_duplicate(column_id, is_duplicate))) {
+        if (column_items.at(i).expr_->is_ai_column()) {
+          continue;
+        } else if (OB_FAIL(check_insert_column_duplicate(column_id, is_duplicate))) {
         } else if (is_duplicate) {
           ret = OB_ERR_FIELD_SPECIFIED_TWICE;
           ObCStringHelper helper;

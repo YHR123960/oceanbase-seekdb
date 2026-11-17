@@ -1,0 +1,24 @@
+select count(*) = 1 as definition_is_visible
+from oceanbase.__all_ai_column a
+join oceanbase.__all_table t on t.table_id = a.table_id
+join oceanbase.__all_database d on d.database_id = t.database_id
+where d.database_name = 'ai_column_metadata_smoke' and t.table_name = 'docs'
+  and a.column_name = 'result' and a.max_retries = 2
+and a.state_column_id is not null and a.request_column_id is not null
+and a.result_spec_column_id is not null
+and a.normalized_expr like '%Return exactly one valid JSON value%';
+definition_is_visible
+1
+select count(*) = 1 as definition_was_replaced
+from oceanbase.__all_ai_column a
+join oceanbase.__all_table t on t.table_id = a.table_id
+join oceanbase.__all_database d on d.database_id = t.database_id
+where d.database_name = 'ai_column_metadata_smoke' and t.table_name = 'docs'
+  and a.column_name = 'result' and a.max_retries = 4
+and a.normalized_expr like '%New: %';
+definition_was_replaced
+1
+insert into ai_column_metadata_smoke.docs(id, content, result) values(1, 'untrusted', '{}');
+ERROR 0A000: direct writes to an AI COLUMN not supported
+update ai_column_metadata_smoke.docs set result = '{}';
+ERROR 0A000: direct writes to an AI COLUMN not supported

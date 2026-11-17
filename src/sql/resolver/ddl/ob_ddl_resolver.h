@@ -517,7 +517,18 @@ protected:
       const ObTableSchema &table_schema,
       const bool unused_flag = false,
       const bool is_create_table_as = false,
-      const bool allow_has_default = true);
+      const bool allow_has_default = true,
+      const common::ObIArray<share::schema::ObColumnSchemaV2> *create_columns = nullptr);
+  static bool has_ai_column_definition(const ParseNode &node);
+  static constexpr int64_t AI_COLUMN_AUX_COUNT = 3;
+  static int build_ai_column_aux_schema(const ObColumnSchemaV2 &owner,
+                                        int64_t index,
+                                        ObColumnSchemaV2 &column);
+  int resolve_ai_column_definition(
+      ObColumnSchemaV2 &column,
+      const ParseNode &definition,
+      const ObTableSchema &table_schema,
+      const common::ObIArray<ObColumnSchemaV2> *create_columns);
   int drop_not_null_constraint(const share::schema::ObColumnSchemaV2 &column);
   int resolve_normal_column_attribute_constr_not_null(ObColumnSchemaV2 &column,
                                                       ParseNode *attrs_node,

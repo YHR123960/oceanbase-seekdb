@@ -77,11 +77,14 @@ int ObColumnSchemaV2::assign(const ObColumnSchemaV2 &src_schema)
     sub_type_ = src_schema.sub_type_;
     skip_index_attr_ = src_schema.skip_index_attr_;
     lob_chunk_size_ = src_schema.lob_chunk_size_;
+    ai_column_max_retries_ = src_schema.ai_column_max_retries_;
 
     if (OB_FAIL(deep_copy_obj(src_schema.orig_default_value_, orig_default_value_))) {
     } else if (OB_FAIL(deep_copy_obj(src_schema.cur_default_value_, cur_default_value_))) {
     } else if (OB_FAIL(deep_copy_str(src_schema.column_name_, column_name_))) {
     } else if (OB_FAIL(deep_copy_str(src_schema.comment_, comment_))) {
+    } else if (OB_FAIL(deep_copy_str(src_schema.ai_column_expression_, ai_column_expression_))) {
+    } else if (OB_FAIL(set_ai_column_source(src_schema.ai_column_source_))) {
     } else if (OB_FAIL(set_extended_type_info(src_schema.extended_type_info_))) {
     } else if (src_schema.column_ref_idxs_ != NULL) {
       if (OB_FAIL(alloc_column_ref_set())) {
@@ -120,6 +123,7 @@ int64_t ObColumnSchemaV2::get_convert_size() const
   convert_size += cur_default_value_.get_deep_copy_size();
   convert_size += column_name_.length() + 1;
   convert_size += comment_.length() + 1;
+  convert_size += ai_column_expression_.length() + ai_column_source_.length() + 2;
   if (column_ref_idxs_ != NULL) {
     convert_size += sizeof(ColumnReferenceSet);
   }
@@ -178,6 +182,9 @@ void ObColumnSchemaV2::reset()
   comment_.reset();
   column_flags_ = NON_CASCADE_FLAG;
   column_ref_idxs_ = NULL;
+  ai_column_expression_.reset();
+  ai_column_source_.reset();
+  ai_column_max_retries_ = 0;
   prev_column_id_ = UINT64_MAX;
   next_column_id_ = UINT64_MAX;
   encoding_type_ = INT64_MAX;
@@ -236,6 +243,9 @@ OB_DEF_SERIALIZE(ObColumnSchemaV2)
                 skip_index_attr_,
                 lob_chunk_size_,
                 local_session_vars_);
+  }
+  if (is_ai_column()) {
+    LST_DO_CODE(OB_UNIS_ENCODE, ai_column_expression_, ai_column_max_retries_, ai_column_source_);
   }
 
   return ret;
@@ -297,6 +307,14 @@ OB_DEF_DESERIALIZE(ObColumnSchemaV2)
                 lob_chunk_size_,
                 local_session_vars_);
   }
+  if (OB_SUCC(ret) && is_ai_column()) {
+    ObString expression;
+    ObString source;
+    LST_DO_CODE(OB_UNIS_DECODE, expression, ai_column_max_retries_, source);
+    if (OB_SUCC(ret) && OB_FAIL(set_ai_column_definition(expression, ai_column_max_retries_))) {
+    } else if (OB_SUCC(ret) && OB_FAIL(set_ai_column_source(source))) {
+    }
+  }
   return ret;
 }
 
@@ -341,6 +359,9 @@ OB_DEF_SERIALIZE_SIZE(ObColumnSchemaV2)
               skip_index_attr_,
               lob_chunk_size_,
               local_session_vars_);
+  if (is_ai_column()) {
+    LST_DO_CODE(OB_UNIS_ADD_LEN, ai_column_expression_, ai_column_max_retries_, ai_column_source_);
+  }
   return len;
 }
 
@@ -571,10 +592,30 @@ int ObColumnSchemaV2::convert_column_id(const hash::ObHashMap<uint64_t, uint64_t
   return ret;
 }
 
+int ObColumnSchemaV2::set_ai_column_definition(const ObString &expression, const int64_t max_retries)
+{
+  int ret = OB_SUCCESS;
+  if (expression.empty() || max_retries < 0 || max_retries > INT32_MAX) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (OB_FAIL(deep_copy_str(expression, ai_column_expression_))) {
+  } else {
+    ai_column_max_retries_ = max_retries;
+    add_column_flag(AI_COLUMN_FLAG);
+  }
+  return ret;
+}
+
 int ObColumnSchemaV2::serialize_extended_type_info(char *buf, const int64_t buf_len, int64_t &pos) const
 {
   int ret = OB_SUCCESS;
   if (OB_FAIL(serialize_string_array(buf, buf_len, pos, extended_type_info_))) {
+  } else if (is_ai_column()) {
+    // Keep collection type descriptors separate from the AI definition and dependencies.
+    const bool has_dependencies = column_ref_idxs_ != nullptr;
+    LST_DO_CODE(OB_UNIS_ENCODE, ai_column_source_, has_dependencies);
+    if (has_dependencies) {
+      OB_UNIS_ENCODE(*column_ref_idxs_);
+    }
   }
   return ret;
 }
@@ -585,6 +626,17 @@ int ObColumnSchemaV2::deserialize_extended_type_info(const char *buf,
 {
   int ret = OB_SUCCESS;
   if (OB_FAIL(deserialize_string_array(buf, data_len, pos, extended_type_info_, get_allocator()))) {
+  } else if (is_ai_column()) {
+    ObString source;
+    bool has_dependencies = false;
+    LST_DO_CODE(OB_UNIS_DECODE, source, has_dependencies);
+    if (OB_SUCC(ret) && OB_FAIL(set_ai_column_source(source))) {
+    } else if (OB_SUCC(ret) && has_dependencies) {
+      if (OB_FAIL(alloc_column_ref_set())) {
+      } else {
+        OB_UNIS_DECODE(*column_ref_idxs_);
+      }
+    }
   }
   return ret;
 }

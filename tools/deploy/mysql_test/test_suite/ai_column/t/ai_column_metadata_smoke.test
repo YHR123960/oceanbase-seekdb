@@ -1,0 +1,46 @@
+# Exercise schema round-tripping without sending model requests.
+connection default;
+--disable_query_log
+create database ai_column_metadata_smoke;
+call DBMS_AI_SERVICE.CREATE_AI_MODEL('ai_column_metadata_smoke_complete',
+  '{"type":"completion","model_name":"mock-complete"}');
+create table ai_column_metadata_smoke.docs(
+  id bigint primary key,
+  content varchar(200),
+  result json AI COLUMN (AI_COMPLETE('ai_column_metadata_smoke_complete', content))
+    WITH (sync_mode='async', max_retries=2)
+);
+--enable_query_log
+
+select count(*) = 1 as definition_is_visible
+from oceanbase.__all_ai_column a
+join oceanbase.__all_table t on t.table_id = a.table_id
+join oceanbase.__all_database d on d.database_id = t.database_id
+where d.database_name = 'ai_column_metadata_smoke' and t.table_name = 'docs'
+  and a.column_name = 'result' and a.max_retries = 2
+  and a.state_column_id is not null and a.request_column_id is not null
+  and a.result_spec_column_id is not null
+  and a.normalized_expr like '%Return exactly one valid JSON value%';
+
+--disable_query_log
+alter table ai_column_metadata_smoke.docs modify column result json AI COLUMN (
+  AI_COMPLETE('ai_column_metadata_smoke_complete', concat('New: ', content))
+) WITH (sync_mode='async', max_retries=4);
+--enable_query_log
+select count(*) = 1 as definition_was_replaced
+from oceanbase.__all_ai_column a
+join oceanbase.__all_table t on t.table_id = a.table_id
+join oceanbase.__all_database d on d.database_id = t.database_id
+where d.database_name = 'ai_column_metadata_smoke' and t.table_name = 'docs'
+  and a.column_name = 'result' and a.max_retries = 4
+  and a.normalized_expr like '%New: %';
+
+--error 1235
+insert into ai_column_metadata_smoke.docs(id, content, result) values(1, 'untrusted', '{}');
+--error 1235
+update ai_column_metadata_smoke.docs set result = '{}';
+--disable_query_log
+drop table ai_column_metadata_smoke.docs;
+call DBMS_AI_SERVICE.DROP_AI_MODEL('ai_column_metadata_smoke_complete');
+drop database ai_column_metadata_smoke;
+--enable_query_log

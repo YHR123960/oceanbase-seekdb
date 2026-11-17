@@ -59,6 +59,7 @@ SHARE_UNITY_GROUPS = [
             "src/share/inner_table/ob_inner_table_schema.21551_21600.cpp",
             "src/share/inner_table/ob_inner_table_schema.21601_21650.cpp",
             "src/share/inner_table/ob_inner_table_schema.21651_21700.cpp",
+            "src/share/inner_table/ob_inner_table_schema.21701_21750.cpp",
             "src/share/inner_table/ob_inner_table_schema.50001_50050.cpp",
             "src/share/inner_table/ob_inner_table_schema.50101_50150.cpp",
             "src/share/inner_table/ob_inner_table_schema.51001_51050.cpp",

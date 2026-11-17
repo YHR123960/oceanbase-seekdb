@@ -85,6 +85,9 @@ int ObCreateTableResolver::add_primary_key_part(const ObString &column_name,
                                                               primary_keys_.count(),
                                                               pk_data_length,
                                                               col))) {
+  } else if (col->is_ai_column()) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "an AI COLUMN in the primary key");
   } else if (OB_FAIL(primary_keys_.push_back(col->get_column_id()))) {
   } else {
     // Primary key columns cannot be set null or default null; the following
@@ -664,6 +667,9 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
         if (OB_FAIL(ret)) {
         } else if (OB_FAIL(resolve_column_name(column, element))) {
         } else {
+          if (has_ai_column_definition(*element)) {
+            column.add_column_flag(AI_COLUMN_FLAG);
+          }
           OZ (resolved_cols.push_back(column));
         }
       }
@@ -694,7 +700,9 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
                                                 pk_name,
                                                 table_schema,
                                                 false,
-                                                is_create_table_as))) {
+                                                is_create_table_as,
+                                                true,
+                                                &resolved_cols))) {
           } else if (OB_FAIL(check_default_value(column.get_cur_default_value(),
                                           session_info_->get_tz_info_wrap(),
                                           NULL,
@@ -891,6 +899,20 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
         } else {
           ObColumnNameHashWrapper name_key(hidden_col.get_column_name_str());
           if (OB_FAIL(column_name_set_.set_refactored(name_key))) {
+          }
+        }
+      }
+    }
+
+    // Add auxiliary columns after the user columns so the physical order follows column IDs.
+    for (int64_t i = 0; OB_SUCC(ret) && i < resolved_cols_count; ++i) {
+      const ObColumnSchemaV2 &column = resolved_cols.at(i);
+      for (int64_t j = 0; OB_SUCC(ret) && column.is_ai_column() && j < AI_COLUMN_AUX_COUNT; ++j) {
+        ObColumnSchemaV2 hidden_column(allocator_);
+        if (OB_FAIL(build_ai_column_aux_schema(column, j, hidden_column))) {
+        } else {
+          hidden_column.set_column_id(gen_column_id());
+          if (OB_FAIL(table_schema.add_column(hidden_column))) {
           }
         }
       }

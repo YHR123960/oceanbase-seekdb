@@ -7456,6 +7456,22 @@ int ObDDLService::fill_new_column_attributes(
     new_column_schema.set_skip_index_attr(alter_column_schema.get_skip_index_attr().get_packed_value());
     new_column_schema.set_lob_chunk_size(alter_column_schema.get_lob_chunk_size());
     if (OB_FAIL(new_column_schema.get_local_session_var().deep_copy(alter_column_schema.get_local_session_var()))) {
+    } else if (alter_column_schema.is_ai_column()) {
+      ObSEArray<uint64_t, 8> previous_dependencies;
+      ObSEArray<uint64_t, 8> dependencies;
+      if (OB_FAIL(new_column_schema.set_ai_column_definition(alter_column_schema.get_ai_column_expression(),
+                                                          alter_column_schema.get_ai_column_max_retries()))) {
+      } else if (OB_FAIL(new_column_schema.set_ai_column_source(alter_column_schema.get_ai_column_source()))) {
+      } else if (OB_FAIL(new_column_schema.get_cascaded_column_ids(previous_dependencies))) {
+      } else if (OB_FAIL(alter_column_schema.get_cascaded_column_ids(dependencies))) {
+      } else {
+        for (int64_t i = 0; OB_SUCC(ret) && i < previous_dependencies.count(); ++i) {
+          ret = new_column_schema.del_cascaded_column_id(previous_dependencies.at(i));
+        }
+        for (int64_t i = 0; OB_SUCC(ret) && i < dependencies.count(); ++i) {
+          ret = new_column_schema.add_cascaded_column_id(dependencies.at(i));
+        }
+      }
     }
   }
   return ret;

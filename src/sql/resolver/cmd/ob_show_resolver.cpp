@@ -395,7 +395,10 @@ int ObShowResolver::resolve(const ParseNode &parse_tree)
                */
               bool is_full = (1 == ((parse_tree.children_[0]->value_)&1));
               bool is_extended = (1 == (((parse_tree.children_[0]->value_)>>1)&1));
-              if (OB_UNLIKELY(((parse_tree.children_[0]->value_)>>2) != 0)) {
+              if (parse_tree.children_[0]->value_ == 4) {
+                GEN_SQL_STEP_1(ObShowSqlSet::SHOW_AI_COLUMNS);
+                GEN_SQL_STEP_2(ObShowSqlSet::SHOW_AI_COLUMNS, OB_SYS_DATABASE_NAME, OB_ALL_AI_COLUMN_TNAME, show_table_id);
+              } else if (OB_UNLIKELY(((parse_tree.children_[0]->value_)>>2) != 0)) {
                 ret = OB_ERR_UNEXPECTED;
               } else if (is_full) {
                 if (is_extended) {
@@ -2375,6 +2378,12 @@ DEFINE_SHOW_CLAUSE_SET(SHOW_COLUMNS,
                         FROM %s.%s  where table_id = %ld AND is_hidden = False",
                         R"(SELECT "FIELD" AS "FIELD", "TYPE" AS "TYPE", "NULL" AS "NULL", "KEY" AS "KEY", "DEFAULT" AS "DEFAULT", "EXTRA" AS "EXTRA" )"
                         R"(FROM %s.%s  WHERE TABLE_ID = %ld AND IS_HIDDEN = 0)",
+                       "Field");
+DEFINE_SHOW_CLAUSE_SET(SHOW_AI_COLUMNS,
+                       NULL,
+                       "SELECT column_name AS Field, normalized_expr AS Expression, sync_mode AS Sync_mode, "
+                       "max_retries AS Max_retries FROM %s.%s WHERE table_id = %ld ORDER BY column_id",
+                       NULL,
                        "Field");
 DEFINE_SHOW_CLAUSE_SET(SHOW_FULL_COLUMNS,
                        NULL,
