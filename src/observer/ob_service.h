@@ -67,6 +67,19 @@ private:
   bool is_inited_;
 };
 
+class ObAiColumnTaskWorker : public common::ObTimerTask
+{
+public:
+  int start();
+  void stop() { timer_.stop(); }
+  void wait() { timer_.wait(); }
+  void destroy() { timer_.destroy(); }
+  void runTimerTask() override;
+
+private:
+  common::ObTimer timer_;
+};
+
 class TelemetryTask {
 public:
   TelemetryTask() = default;
@@ -176,6 +189,7 @@ private:
   const share::ObGlobalContext &gctx_;
   query::ObIChangeStreamService &change_stream_service_;
   ObSchemaReleaseTimeTask schema_release_task_;
+  ObAiColumnTaskWorker ai_column_worker_;
   TelemetryTask telemetry_task_;
 };
 

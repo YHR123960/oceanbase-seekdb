@@ -1,0 +1,51 @@
+# A terminal error in one column must not suppress a successful sibling.
+--exec python3 mysql_test/test_suite/ai_column/include/ai_column_mock.py start 19122
+--disable_query_log
+CREATE DATABASE ai_column_partial_failure;
+CALL DBMS_AI_SERVICE.CREATE_AI_MODEL('partial_ok', '{"type":"completion","model_name":"mock-complete"}');
+CALL DBMS_AI_SERVICE.CREATE_AI_MODEL('partial_fail', '{"type":"completion","model_name":"mock-fail"}');
+CALL DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT('partial_ok_ep',
+  '{"ai_model_name":"partial_ok","url":"http://127.0.0.1:19122/v1/chat/completions","access_key":"mock-only","provider":"openai","request_model_name":"mock-complete"}');
+CALL DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT('partial_fail_ep',
+  '{"ai_model_name":"partial_fail","url":"http://127.0.0.1:19122/v1/always-fail/completions","access_key":"mock-only","provider":"openai","request_model_name":"mock-fail"}');
+CREATE TABLE ai_column_partial_failure.docs (
+  id BIGINT PRIMARY KEY,
+  body VARCHAR(100),
+  output_ok VARCHAR(200) AI COLUMN (AI_COMPLETE('partial_ok', body)) WITH (max_retries=0),
+  output_fail VARCHAR(200) AI COLUMN (AI_COMPLETE('partial_fail', body)) WITH (max_retries=1)
+);
+INSERT INTO ai_column_partial_failure.docs (id, body) VALUES (1, 'partial failure');
+let $remaining = 150;
+let $published = 0;
+while ($remaining)
+{
+  let $published = `SELECT COUNT(*) = 1 FROM ai_column_partial_failure.docs
+                   WHERE output_ok = 'mock:partial failure'`;
+  if ($published == 1)
+  {
+    let $remaining = 0;
+  }
+  if ($published == 0)
+  {
+    --real_sleep 0.1
+    dec $remaining;
+  }
+}
+SELECT output_ok = 'mock:partial failure' AND output_fail IS NULL AS successful_sibling_published
+FROM ai_column_partial_failure.docs WHERE id = 1;
+SELECT COUNT(*) = 0 AS group_queue_drained
+FROM oceanbase.__all_ai_column_task task
+JOIN oceanbase.__all_table t ON t.table_id = task.table_id
+JOIN oceanbase.__all_database d ON d.database_id = t.database_id
+WHERE d.database_name = 'ai_column_partial_failure' AND t.table_name = 'docs';
+--disable_result_log
+--error 1235
+UPDATE /*+ USE_PLAN_CACHE(NONE) */ ai_column_partial_failure.docs SET output_ok = 'spoof' WHERE id = 1;
+--enable_result_log
+DROP DATABASE ai_column_partial_failure;
+CALL DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('partial_fail_ep');
+CALL DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('partial_ok_ep');
+CALL DBMS_AI_SERVICE.DROP_AI_MODEL('partial_fail');
+CALL DBMS_AI_SERVICE.DROP_AI_MODEL('partial_ok');
+--enable_query_log
+--exec python3 mysql_test/test_suite/ai_column/include/ai_column_mock.py stop 19122

@@ -15,6 +15,7 @@
  */
 
 #define USING_LOG_PREFIX SQL_RESV
+#include "sql/engine/dml/ob_ai_column_tasks.h"
 #include "ob_del_upd_resolver.h"
 #include "sql/resolver/dml/ob_default_value_utils.h"
 #include "sql/resolver/dml/ob_update_stmt.h"
@@ -129,7 +130,8 @@ int ObDelUpdResolver::resolve_assignments(const ParseNode &parse_node,
         ObRawExpr *expr = value_list.at(i);
         bool is_generated_column = true;
         // Mysql only allows updating generated columns to their default value
-        if (ref_expr->is_ai_column()) {
+        if (ref_expr->is_ai_column() && !(ai_column_worker_write && session_info_->is_inner()
+                                         && !session_info_->is_user_session())) {
           ret = OB_NOT_SUPPORTED;
           LOG_USER_ERROR(OB_NOT_SUPPORTED, "direct writes to an AI COLUMN");
         } else if (OB_FAIL(check_basic_column_generated(ref_expr, stmt, is_generated_column))) {

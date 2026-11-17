@@ -151,6 +151,13 @@ int execute_ai_task_sql(ObTableModifyOp &op, const ObSqlString &deletion, const 
 }
 } // namespace
 
+thread_local bool ai_column_worker_write = false;
+
+int get_ai_column_state_name(const ObString &column, ObSqlString &name)
+{
+  return name.assign_fmt("__ob_ai_state_%016lx", column.hash());
+}
+
 bool is_ai_column_task_nested_sql(const ObExecContext *parent)
 {
   return parent != nullptr && parent == ai_task_parent;
@@ -163,7 +170,8 @@ int maintain_ai_column_tasks(ObTableModifyOp &op, const ObDMLBaseCtDef &dml,
   const uint64_t table_id = dml.das_base_ctdef_.index_tid_;
   auto *sql_ctx = op.get_exec_ctx().get_sql_ctx();
   const ObTableSchema *schema = nullptr;
-  if (!dml.is_primary_index_ || is_inner_table(table_id) || sql_ctx == nullptr || sql_ctx->schema_guard_ == nullptr) {
+  if (ai_column_worker_write || !dml.is_primary_index_ || is_inner_table(table_id)
+      || sql_ctx == nullptr || sql_ctx->schema_guard_ == nullptr) {
     // Queue writes themselves target an inner table and never enqueue work.
   } else if (OB_FAIL(sql_ctx->schema_guard_->get_table_schema(table_id, schema))) {
   } else if (schema != nullptr && schema->is_user_table()) {

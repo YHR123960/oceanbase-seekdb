@@ -16,6 +16,7 @@
 
 #define USING_LOG_PREFIX SQL_RESV
 #include "sql/resolver/dml/ob_update_resolver.h"
+#include "sql/engine/dml/ob_ai_column_tasks.h"
 
 namespace oceanbase
 {
@@ -134,17 +135,25 @@ int ObUpdateResolver::resolve(const ParseNode &parse_tree)
           }
         }
         if (invalidate) {
-          ColumnItem *item = nullptr;
-          ObAssignment reset;
-          if (OB_FAIL(resolve_basic_column_item(*table_item, column.get_column_name_str(), false, item))) {
-          } else if (OB_ISNULL(item)) {
-            ret = OB_ERR_UNEXPECTED;
-          } else if (OB_FAIL(ObRawExprUtils::build_null_expr(*params_.expr_factory_, reset.expr_))) {
-          } else if (OB_FAIL(add_additional_function_according_to_type(item, reset.expr_, T_UPDATE_SCOPE, true))) {
+          ObSqlString state_name;
+          if (OB_FAIL(get_ai_column_state_name(column.get_column_name_str(), state_name))) {
           } else {
-            reset.column_expr_ = item->expr_;
-            reset.is_implicit_ = true;
-            ret = target.assignments_.push_back(reset);
+            const ObString names[] = {column.get_column_name_str(), state_name.string()};
+            for (int j = 0; OB_SUCC(ret) && j < ARRAYSIZEOF(names); ++j) {
+              ColumnItem *item = nullptr;
+              ObAssignment reset;
+              if (OB_FAIL(resolve_basic_column_item(*table_item, names[j], j != 0, item))) {
+              } else if (OB_ISNULL(item)) {
+                ret = OB_ERR_UNEXPECTED;
+              } else if (OB_FAIL(ObRawExprUtils::build_null_expr(*params_.expr_factory_, reset.expr_))) {
+              } else if (OB_FAIL(add_additional_function_according_to_type(item, reset.expr_,
+                                                                          T_UPDATE_SCOPE, true))) {
+              } else {
+                reset.column_expr_ = item->expr_;
+                reset.is_implicit_ = true;
+                ret = target.assignments_.push_back(reset);
+              }
+            }
           }
         }
       }

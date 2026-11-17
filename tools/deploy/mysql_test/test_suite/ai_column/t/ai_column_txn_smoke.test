@@ -5,8 +5,8 @@ CALL DBMS_AI_SERVICE.CREATE_AI_MODEL('txn_smoke_model',
   '{"type":"completion","model_name":"mock-complete"}');
 CREATE TABLE ai_column_txn_smoke.docs (
   id BIGINT PRIMARY KEY, title VARCHAR(40), body VARCHAR(40),
-  result VARCHAR(80) AI COLUMN (AI_COMPLETE('txn_smoke_model', body)),
-  label VARCHAR(80) AI COLUMN (AI_COMPLETE('txn_smoke_model', CONCAT('Label: ', body)))
+  result VARCHAR(80) AI COLUMN (AI_COMPLETE('txn_smoke_model', body)) WITH (max_retries=10),
+  label VARCHAR(80) AI COLUMN (AI_COMPLETE('txn_smoke_model', CONCAT('Label: ', body))) WITH (max_retries=10)
 );
 SET @table_id = (
   SELECT t.table_id FROM oceanbase.__all_table t

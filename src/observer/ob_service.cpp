@@ -22,6 +22,13 @@
 #include "lib/stat/ob_diagnostic_info_guard.h"
 #include "lib/time/ob_time_utility.h"
 #include "ob_service.h"
+#include "common/mysqlclient/ob_mysql_transaction.h"
+#include "common/json_type/ob_json_base.h"
+#include <charconv>
+#include <cmath>
+#include <cstdlib>
+#include "sql/engine/dml/ob_ai_column_tasks.h"
+#include <openssl/rand.h>
 #include "storage/ob_storage_rpc_arg.h"
 #include "share/rc/ob_server_runtime.h"
 #include "share/ob_telemetry.h"
@@ -72,6 +79,380 @@ using namespace palf;
 
 namespace observer
 {
+
+namespace
+{
+constexpr const char *AI_TASK_TABLE = "oceanbase.__all_ai_column_task";
+enum AiTaskState { AI_PENDING, AI_RUNNING, AI_SUCCEEDED, AI_RETRY, AI_FAILED };
+
+struct AiTaskKey
+{
+  int64_t table_id_ = 0;
+  ObString digest_;
+  ObString request_;
+  ObString predicate_;
+};
+
+int append_ai_worker_literal(ObSqlString &sql, const ObString &value)
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(sql.append("X'"))) {
+  } else if (OB_FAIL(sql.reserve(sql.length() + 2 * value.length() + 2))) {
+  } else {
+    int64_t pos = sql.length();
+    if (OB_FAIL(hex_print(value.ptr(), value.length(), sql.ptr(), sql.capacity(), pos))) {
+    } else if (OB_FAIL(sql.set_length(pos))) {
+    } else {
+      ret = sql.append("'");
+    }
+  }
+  return ret;
+}
+
+int append_ai_worker_identifier(ObSqlString &sql, const ObString &identifier)
+{
+  int ret = sql.append("`");
+  for (int64_t i = 0; OB_SUCC(ret) && i < identifier.length(); ++i) {
+    if (identifier[i] == '`') {
+      ret = sql.append("``");
+    } else {
+      ret = sql.append_fmt("%c", identifier[i]);
+    }
+  }
+  if (OB_SUCC(ret)) {
+    ret = sql.append("`");
+  }
+  return ret;
+}
+
+int read_ai_task_key(sqlclient::ObMySQLResult &row, ObIAllocator &allocator, AiTaskKey &key)
+{
+  int ret = OB_SUCCESS;
+  ObString digest;
+  ObString request;
+  ObString predicate;
+  if (OB_FAIL(row.get_int("table_id", key.table_id_))) {
+  } else if (OB_FAIL(row.get_varchar("rowkey_digest", digest))) {
+  } else if (OB_FAIL(row.get_varchar("request_id", request))) {
+  } else if (OB_FAIL(row.get_varchar("rowkey_predicate", predicate))) {
+  } else if (OB_FAIL(ob_write_string(allocator, digest, key.digest_))) {
+  } else if (OB_FAIL(ob_write_string(allocator, request, key.request_))) {
+  } else {
+    ret = ob_write_string(allocator, predicate, key.predicate_);
+  }
+  return ret;
+}
+
+int append_ai_task_key(ObSqlString &sql, const AiTaskKey &key)
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(sql.append_fmt(" WHERE table_id=%ld AND rowkey_digest=", key.table_id_))) {
+  } else if (OB_FAIL(append_ai_worker_literal(sql, key.digest_))) {
+  } else if (OB_FAIL(sql.append(" AND request_id="))) {
+  } else {
+    ret = append_ai_worker_literal(sql, key.request_);
+  }
+  return ret;
+}
+
+int get_ai_worker_schema(uint64_t id, ObSchemaGetterGuard &guard, const ObTableSchema *&table,
+                         ObSqlString &qualified_name)
+{
+  int ret = OB_SUCCESS;
+  const ObDatabaseSchema *database = nullptr;
+  if (OB_FAIL(GCTX.schema_service_->get_runtime_schema_guard(guard))) {
+  } else if (OB_FAIL(guard.get_table_schema(id, table))) {
+  } else if (table == nullptr || !table->is_user_table()) {
+    table = nullptr;
+  } else if (OB_FAIL(guard.get_database_schema(table->get_database_id(), database))) {
+  } else if (database == nullptr) {
+    table = nullptr;
+  } else if (OB_FAIL(append_ai_worker_identifier(qualified_name, database->get_database_name_str()))) {
+  } else if (OB_FAIL(qualified_name.append("."))) {
+  } else {
+    ret = append_ai_worker_identifier(qualified_name, table->get_table_name_str());
+  }
+  return ret;
+}
+
+int validate_ai_task_result(ObIAllocator &allocator, const ObColumnSchemaV2 &column, const ObString &value)
+{
+  int ret = OB_SUCCESS;
+  if (value.empty()) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (column.is_json()) {
+    ObIJsonBase *json = nullptr;
+    ret = ObJsonBaseFactory::get_json_base(&allocator, value, ObJsonInType::JSON_TREE,
+                                          ObJsonInType::JSON_TREE, json);
+  } else if (column.get_meta_type().is_integer_type()) {
+    int64_t integer = 0;
+    const char *end = value.ptr() + value.length();
+    const auto parsed = std::from_chars(value.ptr(), end, integer);
+    if (parsed.ec != std::errc() || parsed.ptr != end) {
+      ret = OB_INVALID_ARGUMENT;
+    }
+  } else if (column.get_meta_type().is_numeric_type()) {
+    ObSqlString number;
+    if (OB_FAIL(number.append(value))) {
+    } else {
+      char *end = nullptr;
+      const long double parsed = std::strtold(number.ptr(), &end);
+      if (end != number.ptr() + number.length() || !std::isfinite(parsed)) {
+        ret = OB_INVALID_ARGUMENT;
+      }
+    }
+  }
+  return ret;
+}
+
+int compute_ai_task_result(ObMySQLProxy &proxy, ObIAllocator &allocator, const AiTaskKey &key,
+                           const int64_t column_id, const int64_t version, ObString &value)
+{
+  int ret = OB_SUCCESS;
+  ObSchemaGetterGuard guard;
+  const ObTableSchema *table = nullptr;
+  const ObColumnSchemaV2 *column = nullptr;
+  ObSqlString table_name;
+  ObSqlString stmt;
+  ObISQLClient::ReadResult result;
+  if (OB_FAIL(get_ai_worker_schema(key.table_id_, guard, table, table_name))) {
+  } else if (table == nullptr || (column = table->get_column_schema(column_id)) == nullptr
+             || !column->is_ai_column() || column->get_schema_version() != version) {
+    ret = OB_ENTRY_NOT_EXIST;
+  } else {
+    // MySQL JSON, scalar and vector values are serialized as UTF-8. The business
+    // UPDATE converts them back to the declared type and updates its indexes.
+    const ObString &expr = column->get_ai_column_expression();
+    if (OB_FAIL(stmt.assign_fmt("SELECT /*+ QUERY_TIMEOUT(10000000) */ CAST((%.*s) AS CHAR CHARACTER SET utf8mb4)"
+                                " FROM %s WHERE (%.*s) AND EXISTS (SELECT 1 FROM %s",
+                                expr.length(), expr.ptr(), table_name.ptr(), key.predicate_.length(),
+                                key.predicate_.ptr(), AI_TASK_TABLE))) {
+    } else if (OB_FAIL(append_ai_task_key(stmt, key))) {
+    } else if (OB_FAIL(stmt.append_fmt(" AND column_id=%ld AND state=%d)", column_id, AI_RUNNING))) {
+    } else if (OB_FAIL(proxy.read(result, stmt.ptr()))) {
+    } else if (OB_FAIL(result.get_result()->next())) {
+    } else {
+      ObString text;
+      if (OB_FAIL(result.get_result()->get_varchar(static_cast<int64_t>(0), text))) {
+      } else if (text.length() > 1024 * 1024) {
+        ret = OB_SIZE_OVERFLOW;
+      } else if (OB_FAIL(validate_ai_task_result(allocator, *column, text))) {
+      } else {
+        ret = ob_write_string(allocator, text, value);
+      }
+    }
+  }
+  return ret;
+}
+
+int run_one_ai_task(ObMySQLProxy &proxy)
+{
+  int ret = OB_SUCCESS;
+  ObArenaAllocator allocator("AiColumnWorker");
+  AiTaskKey key;
+  int64_t column_id = 0;
+  int64_t version = 0;
+  int64_t retry_count = 0;
+  int64_t max_retries = 0;
+  ObSqlString select;
+  if (OB_FAIL(select.assign_fmt("SELECT table_id,rowkey_digest,request_id,rowkey_predicate,column_id,"
+                                "definition_version,retry_count,max_retries FROM %s "
+                                "WHERE state IN (0,1,3) AND eligible_ts<=NOW(6) "
+                                "ORDER BY eligible_ts,table_id,rowkey_digest,column_id LIMIT 1", AI_TASK_TABLE))) {
+  } else {
+    ObISQLClient::ReadResult result;
+    if (OB_FAIL(proxy.read(result, select.ptr()))) {
+    } else if (OB_FAIL(result.get_result()->next())) {
+    } else if (OB_FAIL(read_ai_task_key(*result.get_result(), allocator, key))) {
+    } else if (OB_FAIL(result.get_result()->get_int("column_id", column_id))) {
+    } else if (OB_FAIL(result.get_result()->get_int("definition_version", version))) {
+    } else if (OB_FAIL(result.get_result()->get_int("retry_count", retry_count))) {
+    } else {
+      ret = result.get_result()->get_int("max_retries", max_retries);
+    }
+  }
+  if (ret == OB_ITER_END) {
+    ret = OB_SUCCESS;
+  } else if (OB_SUCC(ret)) {
+    unsigned char bytes[16];
+    ObString lease(sizeof(bytes), reinterpret_cast<const char *>(bytes));
+    ObSqlString claim;
+    int64_t affected = 0;
+    if (RAND_bytes(bytes, sizeof(bytes)) != 1) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(claim.assign_fmt("UPDATE %s SET state=%d,eligible_ts=NOW(6)+INTERVAL 60 SECOND,"
+                                       "lease_id=HEX(", AI_TASK_TABLE, AI_RUNNING))) {
+    } else if (OB_FAIL(append_ai_worker_literal(claim, lease))) {
+    } else if (OB_FAIL(claim.append(")"))) {
+    } else if (OB_FAIL(append_ai_task_key(claim, key))) {
+    } else if (OB_FAIL(claim.append_fmt(" AND column_id=%ld AND retry_count=%ld "
+                                       "AND state IN (0,1,3) AND eligible_ts<=NOW(6)", column_id, retry_count))) {
+    } else if (OB_FAIL(proxy.write(claim.ptr(), affected))) {
+    } else if (affected == 1) {
+      ObString value;
+      const int model_ret = compute_ai_task_result(proxy, allocator, key, column_id, version, value);
+      const bool retry = model_ret != OB_SUCCESS && model_ret != OB_ENTRY_NOT_EXIST && model_ret != OB_ITER_END
+          && retry_count < max_retries;
+      const int state = model_ret == OB_SUCCESS ? AI_SUCCEEDED : retry ? AI_RETRY : AI_FAILED;
+      ObSqlString finish;
+      if (OB_FAIL(finish.assign_fmt("UPDATE %s SET state=%d,retry_count=%ld,lease_id=NULL,"
+                                     "eligible_ts=NOW(6)+INTERVAL %d SECOND,result_payload=",
+                                     AI_TASK_TABLE, state, retry_count + (retry ? 1 : 0), retry ? 1 : 0))) {
+      } else if (state == AI_SUCCEEDED && OB_FAIL(append_ai_worker_literal(finish, value))) {
+      } else if (state != AI_SUCCEEDED && OB_FAIL(finish.append("NULL"))) {
+      } else if (OB_FAIL(append_ai_task_key(finish, key))) {
+      } else if (OB_FAIL(finish.append_fmt(" AND column_id=%ld AND state=%d AND lease_id=HEX(",
+                                         column_id, AI_RUNNING))) {
+      } else if (OB_FAIL(append_ai_worker_literal(finish, lease))) {
+      } else if (OB_FAIL(finish.append(")"))) {
+      } else {
+        ret = proxy.write(finish.ptr(), affected);
+      }
+    }
+  }
+  return ret;
+}
+
+int publish_one_ai_group(ObMySQLProxy &proxy)
+{
+  int ret = OB_SUCCESS;
+  ObArenaAllocator allocator("AiColumnPublish");
+  AiTaskKey key;
+  ObSqlString select;
+  bool found = false;
+  if (OB_FAIL(select.assign_fmt("SELECT t.table_id,t.rowkey_digest,t.request_id,t.rowkey_predicate"
+                                " FROM %s t WHERE t.state IN (2,4) AND NOT EXISTS (SELECT 1 FROM %s u"
+                                " WHERE u.table_id=t.table_id AND u.rowkey_digest=t.rowkey_digest"
+                                " AND u.request_id=t.request_id AND u.state NOT IN (2,4))"
+                                " ORDER BY t.eligible_ts LIMIT 1", AI_TASK_TABLE, AI_TASK_TABLE))) {
+  } else {
+    ObISQLClient::ReadResult result;
+    if (OB_FAIL(proxy.read(result, select.ptr()))) {
+    } else if (OB_FAIL(result.get_result()->next())) {
+      if (ret == OB_ITER_END) {
+        ret = OB_SUCCESS;
+      }
+    } else if (OB_FAIL(read_ai_task_key(*result.get_result(), allocator, key))) {
+    } else {
+      found = true;
+    }
+  }
+  if (OB_SUCC(ret) && found) {
+    ObMySQLTransaction tx;
+    ObSqlString lock;
+    ObSchemaGetterGuard guard;
+    const ObTableSchema *table = nullptr;
+    ObSqlString table_name;
+    ObSqlString update;
+    bool ready = true;
+    bool outdated = false;
+    int64_t seen = 0;
+    if (OB_FAIL(get_ai_worker_schema(key.table_id_, guard, table, table_name))) {
+    } else if (OB_FAIL(lock.assign_fmt("SELECT column_id,definition_version,state,CAST(result_payload AS CHAR CHARACTER SET utf8mb4) result_payload FROM %s",
+                                       AI_TASK_TABLE))) {
+    } else if (OB_FAIL(append_ai_task_key(lock, key))) {
+    } else if (OB_FAIL(lock.append(" ORDER BY column_id FOR UPDATE"))) {
+    } else if (table != nullptr &&
+               OB_FAIL(update.assign_fmt("UPDATE /*+ USE_PLAN_CACHE(NONE) */ %s SET ", table_name.ptr()))) {
+    } else if (OB_FAIL(tx.start(&proxy))) {
+    } else {
+      ObISQLClient::ReadResult result;
+      if (OB_FAIL(tx.read(result, lock.ptr()))) {
+      } else {
+        auto &row = *result.get_result();
+        int next_ret = OB_SUCCESS;
+        while (OB_SUCC(ret) && ready && (next_ret = row.next()) == OB_SUCCESS) {
+          int64_t id = 0;
+          int64_t version = 0;
+          int64_t state = 0;
+          const ObColumnSchemaV2 *column = nullptr;
+          ++seen;
+          if (OB_FAIL(row.get_int("column_id", id))) {
+          } else if (OB_FAIL(row.get_int("definition_version", version))) {
+          } else if (OB_FAIL(row.get_int("state", state))) {
+          } else if (state != AI_SUCCEEDED && state != AI_FAILED) {
+            ready = false;
+          } else if (table == nullptr || (column = table->get_column_schema(id)) == nullptr
+                     || !column->is_ai_column() || column->get_schema_version() != version) {
+            outdated = true;
+          } else if (!outdated) {
+            ObSqlString state_name;
+            if (OB_FAIL(sql::get_ai_column_state_name(column->get_column_name_str(), state_name))) {
+            } else if (OB_FAIL(append_ai_worker_identifier(update, state_name.string()))) {
+            } else if (OB_FAIL(update.append_fmt("=%ld,", state))) {
+            } else if (state == AI_SUCCEEDED) {
+              ObString value;
+              if (OB_FAIL(row.get_varchar("result_payload", value))) {
+              } else if (OB_FAIL(append_ai_worker_identifier(update, column->get_column_name_str()))) {
+              } else if (OB_FAIL(update.append("=CONVERT("))) {
+              } else if (OB_FAIL(append_ai_worker_literal(update, value))) {
+              } else {
+                ret = update.append(" USING utf8mb4),");
+              }
+            }
+          }
+        }
+        if (OB_SUCC(ret) && ready && next_ret != OB_ITER_END) {
+          ret = next_ret;
+        }
+      }
+    }
+    if (OB_SUCC(ret) && ready && seen > 0) {
+      int64_t affected = 0;
+      if (!outdated && !update.empty() && update.ptr()[update.length() - 1] == ',') {
+        if (OB_FAIL(update.set_length(update.length() - 1))) {
+        } else if (OB_FAIL(update.append_fmt(" WHERE %.*s", key.predicate_.length(), key.predicate_.ptr()))) {
+        } else {
+          const bool was_worker_write = sql::ai_column_worker_write;
+          sql::ai_column_worker_write = true;
+          ret = tx.write(update.ptr(), affected);
+          sql::ai_column_worker_write = was_worker_write;
+        }
+      }
+      ObSqlString remove;
+      if (OB_SUCC(ret) && OB_FAIL(remove.assign_fmt("DELETE FROM %s", AI_TASK_TABLE))) {
+      } else if (OB_SUCC(ret) && OB_FAIL(append_ai_task_key(remove, key))) {
+      } else if (OB_SUCC(ret)) {
+        ret = tx.write(remove.ptr(), affected);
+      }
+    }
+    if (tx.is_started()) {
+      const int end_ret = tx.end(OB_SUCC(ret));
+      if (OB_SUCC(ret)) {
+        ret = end_ret;
+      }
+    }
+  }
+  return ret;
+}
+} // namespace
+
+int ObAiColumnTaskWorker::start()
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(timer_.set_run_wrapper_with_ret(share::server_runtime()))) {
+  } else if (OB_FAIL(timer_.init("AiColumnWorker", ObMemAttr("AiColumnWorker")))) {
+  } else if (OB_FAIL(timer_.schedule(*this, 150 * 1000L, true))) {
+  }
+  if (OB_FAIL(ret) && timer_.inited()) {
+    timer_.destroy();
+  }
+  return ret;
+}
+
+void ObAiColumnTaskWorker::runTimerTask()
+{
+  if (GCTX.sql_proxy_ != nullptr && GCTX.schema_service_ != nullptr
+      && GCTX.schema_service_->is_runtime_schema_refreshed()) {
+    int ret = run_one_ai_task(*GCTX.sql_proxy_);
+    if (OB_SUCC(ret)) {
+      ret = publish_one_ai_group(*GCTX.sql_proxy_);
+    }
+    if (OB_FAIL(ret) && REACH_TIME_INTERVAL(10 * 1000L * 1000L)) {
+      LOG_WARN("AI column task worker iteration failed", KR(ret));
+    }
+  }
+}
 
 ObSchemaReleaseTimeTask::ObSchemaReleaseTimeTask()
 : schema_updater_(nullptr), timer_(), is_inited_(false)
@@ -217,6 +598,9 @@ int ObService::start()
     ret = OB_NOT_INIT;
     FLOG_WARN("ob_service is not inited", KR(ret), K_(inited));
   }
+  if (OB_SUCC(ret)) {
+    ret = ai_column_worker_.start();
+  }
   FLOG_INFO("[OBSERVICE_NOTICE] start ob_service end", KR(ret));
   if (OB_FAIL(ret)) {
     LOG_DBA_ERROR(OB_ERR_OBSERVICE_START, "msg", "observice start() has failure", KR(ret));
@@ -243,6 +627,7 @@ void ObService::stop()
     stopped_ = true;
 
     FLOG_INFO("begin to stop schema release task");
+    ai_column_worker_.stop();
     schema_release_task_.stop();
     FLOG_INFO("schema release task stopped");
     FLOG_INFO("begin to stop schema updater");
@@ -260,6 +645,7 @@ void ObService::wait()
     LOG_WARN_RET(OB_NOT_INIT, "ob_service not init", K_(inited));
   } else {
     FLOG_INFO("begin to wait schema release task");
+    ai_column_worker_.wait();
     schema_release_task_.wait();
     FLOG_INFO("wait schema release task success");
     FLOG_INFO("begin to wait schema updater");
@@ -278,6 +664,7 @@ int ObService::destroy()
     ret = OB_NOT_INIT;
   } else {
     FLOG_INFO("begin to destroy schema release task");
+    ai_column_worker_.destroy();
     schema_release_task_.destroy();
     FLOG_INFO("schema release task destroyed");
     FLOG_INFO("begin to destroy schema updater");

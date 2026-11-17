@@ -2466,7 +2466,9 @@ def_table_schema(
       ('eligible_ts', 'timestamp:6', 'false'),
       ('state', 'int', 'false'),
       ('retry_count', 'int', 'false'),
-      ('max_retries', 'int', 'false')
+      ('max_retries', 'int', 'false'),
+      ('lease_id', 'varchar:32', 'true'),
+      ('result_payload', 'longtext', 'true')
     ]
 )
 
