@@ -20,23 +20,30 @@
 #include "sql/engine/ob_operator.h"
 #include "sql/engine/basic/ob_chunk_datum_store.h"
 #include "lib/charset/ob_charset.h"
+#include "sql/engine/basic/file_scan_utils.h"
 
 namespace oceanbase
 {
+namespace pl { class ObPLCollection; }
 namespace sql
 {
 
 class ObExpr;
+class ObSQLSessionInfo;
+int get_file_sql_root(ObSQLSessionInfo &session, common::ObIAllocator &alloc, common::ObString &root);
+int file_sql_status(file_sql::Status status, const std::string &message);
 class ObFunctionTableSpec : public ObOpSpec
 {
 OB_UNIS_VERSION_V(1);
 public:
   ObFunctionTableSpec(common::ObIAllocator &alloc, const ObPhyOperatorType type)
-    : ObOpSpec(alloc, type), value_expr_(nullptr), column_exprs_(alloc), has_correlated_expr_(false)
+    : ObOpSpec(alloc, type), value_expr_(nullptr), column_exprs_(alloc), has_correlated_expr_(false), file_projection_(alloc)
   {}
   ObExpr *value_expr_;
   common::ObFixedArray<ObExpr*, common::ObIAllocator> column_exprs_;
   bool has_correlated_expr_;
+  common::ObString file_scan_spec_;
+  common::ObFixedArray<int64_t, common::ObIAllocator> file_projection_;
 };
 
 class ObFunctionTableOp : public ObOperator
@@ -54,10 +61,14 @@ public:
   virtual int inner_open() override;
   virtual int inner_rescan() override;
   virtual int inner_get_next_row() override;
-  //virtual int inner_get_next_batch(int64_t max_row_cnt) override;
+  int inner_get_next_batch(int64_t max_row_cnt) override;
   virtual int inner_close() override;
   virtual void destroy() override;
 private:
+  int open_file_scan();
+  int inner_get_next_file_row();
+  int read_file_row(size_t &bytes);
+  std::unique_ptr<file_sql::Reader> file_reader_;
   int inner_get_next_row_udf();
   int inner_get_next_row_sys_func();
   int get_current_result(common::ObObj &result);

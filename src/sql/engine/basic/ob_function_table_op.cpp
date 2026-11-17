@@ -19,6 +19,11 @@
 #include "sql/engine/basic/ob_function_table_op.h"
 #include "sql/engine/ob_exec_context.h"
 #include "sql/engine/expr/ob_expr_lob_utils.h"
+#include "sql/session/ob_sql_session_info.h"
+#include "share/schema/ob_schema_utils.h"
+#include "share/ob_server_struct.h"
+#include "sql/pl/ob_pl_user_type.h"
+#include <new>
 
 
 namespace oceanbase
@@ -27,14 +32,188 @@ using namespace common;
 namespace sql
 {
 
-OB_SERIALIZE_MEMBER((ObFunctionTableSpec, ObOpSpec), value_expr_, column_exprs_, has_correlated_expr_);
+OB_SERIALIZE_MEMBER((ObFunctionTableSpec, ObOpSpec), value_expr_, column_exprs_, has_correlated_expr_,
+                    file_scan_spec_, file_projection_);
+
+int get_file_sql_root(ObSQLSessionInfo &session, ObIAllocator &alloc, ObString &root)
+{
+  int ret = OB_SUCCESS;
+  bool enabled = false;
+  if (OB_FAIL(session.get_sys_variable(share::SYS_VAR_ENABLE_FILE_SQL, enabled))) {
+  } else if (!enabled) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "file SQL while enable_file_sql is OFF");
+  } else if (!(session.get_user_priv_set() & OB_PRIV_FILE)) {
+    ret = OB_ERR_NO_PRIVILEGE;
+  } else if (OB_ISNULL(GCTX.schema_service_)) {
+    ret = OB_NOT_INIT;
+  } else if (OB_FAIL(share::schema::ObSchemaUtils::get_runtime_varchar_variable(
+              *GCTX.schema_service_, share::SYS_VAR_SECURE_FILE_PRIV, alloc, root))) {
+  } else if (root.empty() || 0 == root.case_compare("NULL")) {
+    ret = OB_ERR_NO_PRIV_DIRECT_PATH_ACCESS;
+  }
+  return ret;
+}
+
+int file_sql_status(file_sql::Status status, const std::string &message)
+{
+  int ret = OB_SUCCESS;
+  switch (status) {
+    case file_sql::Status::OK: break;
+    case file_sql::Status::END: ret = OB_ITER_END; break;
+    case file_sql::Status::DENIED: ret = OB_ERR_NO_PRIV_DIRECT_PATH_ACCESS; break;
+    case file_sql::Status::IO: ret = OB_IO_ERROR; break;
+    case file_sql::Status::EXISTS: ret = OB_FILE_ALREADY_EXIST; break;
+    case file_sql::Status::INVALID:
+    case file_sql::Status::CHANGED:
+      ret = OB_INVALID_ARGUMENT;
+      LOG_USER_ERROR(OB_INVALID_ARGUMENT, message.c_str());
+      break;
+    case file_sql::Status::UNSUPPORTED:
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, message.c_str());
+      break;
+  }
+  if (ret != OB_SUCCESS && ret != OB_ITER_END) {
+    LOG_WARN("file SQL operation failed", K(ret), "detail", message.c_str());
+  }
+  return ret;
+}
+
+int ObFunctionTableOp::open_file_scan()
+{
+  int ret = OB_SUCCESS;
+  ObArenaAllocator path_allocator("FileSqlPath");
+  ObString root;
+  file_sql::ScanSpec spec;
+  ObSQLSessionInfo *session = ctx_.get_my_session();
+  file_reader_.reset();
+  if (OB_ISNULL(session)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_FAIL(get_file_sql_root(*session, path_allocator, root))) {
+  } else if (!spec.decode(MY_SPEC.file_scan_spec_.ptr(), MY_SPEC.file_scan_spec_.length())) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    std::vector<int64_t> projection;
+    for (int64_t i = 0; i < MY_SPEC.file_projection_.count(); ++i) {
+      projection.push_back(MY_SPEC.file_projection_.at(i));
+    }
+    file_reader_.reset(new (std::nothrow) file_sql::Reader());
+    if (OB_ISNULL(file_reader_.get())) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      const auto status = file_reader_->open(std::string(root.ptr(), root.length()), spec, projection);
+      ret = file_sql_status(status, file_reader_->error());
+    }
+  }
+  if (OB_FAIL(ret)) file_reader_.reset();
+  return ret;
+}
+
+int ObFunctionTableOp::inner_get_next_file_row()
+{
+  size_t bytes = 0;
+  clear_evaluated_flag();
+  return read_file_row(bytes);
+}
+
+int ObFunctionTableOp::inner_get_next_batch(int64_t max_row_cnt)
+{
+  int ret = OB_SUCCESS;
+  clear_evaluated_flag();
+  brs_.size_ = 0;
+  brs_.end_ = false;
+  brs_.skip_->reset(max_row_cnt);
+  ObEvalCtx::BatchInfoScopeGuard guard(eval_ctx_);
+  guard.set_batch_size(max_row_cnt);
+  size_t bytes = 0;
+  for (int64_t i = 0; OB_SUCC(ret) && i < max_row_cnt && bytes < 4 * 1024 * 1024; ++i) {
+    guard.set_batch_idx(i);
+    if (OB_FAIL(read_file_row(bytes))) {
+      if (ret == OB_ITER_END) {
+        ret = OB_SUCCESS;
+        brs_.end_ = true;
+        break;
+      }
+    } else {
+      ++brs_.size_;
+    }
+  }
+  return ret;
+}
+
+int ObFunctionTableOp::read_file_row(size_t &bytes)
+{
+  int ret = OB_SUCCESS;
+  std::vector<file_sql::Cell> row;
+  if (OB_ISNULL(file_reader_.get())) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_FAIL(ctx_.check_status())) {
+  } else {
+    const auto status = file_reader_->next(row);
+    ret = file_sql_status(status, file_reader_->error());
+  }
+  CK (row.size() == static_cast<size_t>(MY_SPEC.column_exprs_.count()));
+  for (size_t i = 0; OB_SUCC(ret) && i < row.size(); ++i) {
+    const ObExpr &expr = *MY_SPEC.column_exprs_.at(i);
+    ObDatum &out = expr.locate_datum_for_write(eval_ctx_);
+    const auto &cell = row[i];
+    bytes += cell.text.size();
+    int64_t integer = 0;
+    double real = 0;
+    if (cell.type == file_sql::Type::NIL) {
+      out.set_null();
+    } else {
+      switch (expr.datum_meta_.type_) {
+        case ObIntType:
+          if (!file_sql::parse_integer(cell.text, integer)) ret = OB_ERR_UNEXPECTED;
+          else out.set_int(integer);
+          break;
+        case ObDoubleType:
+          if (!file_sql::parse_double(cell.text, real)) ret = OB_ERR_UNEXPECTED;
+          else out.set_double(real);
+          break;
+        case ObTinyIntType:
+          out.set_int(cell.text == "true" || 0 == ObString(cell.text.size(), cell.text.data()).case_compare("true"));
+          break;
+        case ObDateType:
+        case ObDateTimeType:
+          if (!file_sql::parse_temporal(cell.text, integer)) ret = OB_ERR_UNEXPECTED;
+          else if (expr.datum_meta_.type_ == ObDateType) out.set_date(integer / 86400000000LL);
+          else out.set_datetime(integer);
+          break;
+        case ObVarcharType: {
+          if (cell.text.size() > OB_MAX_VARCHAR_LENGTH) {
+            ret = OB_SIZE_OVERFLOW;
+          } else {
+            char *buf = expr.get_str_res_mem(eval_ctx_, cell.text.size() + 1);
+            if (OB_ISNULL(buf)) ret = OB_ALLOCATE_MEMORY_FAILED;
+            else {
+              MEMCPY(buf, cell.text.data(), cell.text.size());
+              out.set_string(buf, cell.text.size());
+            }
+          }
+          break;
+        }
+        default:
+          ret = OB_ERR_UNEXPECTED;
+          break;
+      }
+    }
+    if (OB_SUCC(ret)) expr.set_evaluated_projected(eval_ctx_);
+  }
+  return ret;
+}
 
 int ObFunctionTableOp::inner_open()
 {
   int ret = OB_SUCCESS;
   node_idx_ = 0;
   already_calc_ = false;
-  if (OB_ISNULL(MY_SPEC.value_expr_)) {
+  if (!MY_SPEC.file_scan_spec_.empty()) {
+    next_row_func_ = &ObFunctionTableOp::inner_get_next_file_row;
+    OZ (open_file_scan());
+  } else if (OB_ISNULL(MY_SPEC.value_expr_)) {
     ret = OB_ERR_UNEXPECTED;
   } else if (ObExtendType == MY_SPEC.value_expr_->datum_meta_.type_) {
     next_row_func_ = &ObFunctionTableOp::inner_get_next_row_udf;
@@ -48,6 +227,8 @@ int ObFunctionTableOp::inner_rescan()
 {
   int ret = OB_SUCCESS;
   if (OB_FAIL(ObOperator::inner_rescan())) {
+  } else if (!MY_SPEC.file_scan_spec_.empty()) {
+    OZ (open_file_scan());
   } else {
     node_idx_ = 0;
     if (MY_SPEC.has_correlated_expr_) {
@@ -63,6 +244,7 @@ int ObFunctionTableOp::inner_rescan()
 int ObFunctionTableOp::inner_close()
 {
   int ret = OB_SUCCESS;
+  file_reader_.reset();
   node_idx_ = 0;
   row_count_ = 0;
   col_count_ = 0;
@@ -72,6 +254,7 @@ int ObFunctionTableOp::inner_close()
 
 void ObFunctionTableOp::destroy()
 {
+  file_reader_.reset();
   ObOperator::destroy();
 }
 

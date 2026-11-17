@@ -1,0 +1,47 @@
+# owner: database-competition
+# owner group: SQL
+# description: Native file scans across joins and protected CSV exports.
+# tags: sql,executor,file_sql
+
+--source mysql_test/test_suite/file_sql/include/copy_file_sql_data.inc
+--disable_query_log
+let $FILE_SQL_DATA_DIR = $OBSERVER_DIR/data_for_mysqltest_file_sql;
+set session enable_file_sql = ON;
+
+--echo # Cross-format join, projection and grouping
+eval select c.id, j.name from read_csv('$FILE_SQL_DATA_DIR/basic.csv') c
+       inner join read_ndjson('$FILE_SQL_DATA_DIR/basic.jsonl') j on c.id = j.id
+      where c.id > 1 order by c.id desc limit 2;
+eval select c.id, j.note from read_csv('$FILE_SQL_DATA_DIR/basic.csv') c
+       left join read_ndjson('$FILE_SQL_DATA_DIR/basic.jsonl') j
+         on c.id = j.id and j.score is not null
+      order by c.id;
+eval select active, count(*) as n, sum(id) as total
+       from read_csv('$FILE_SQL_DATA_DIR/basic.csv')
+       group by active having count(*) > 1 order by active;
+
+--echo # COPY table, CSV dialect, NULL and exclusion of existing targets
+create table file_sql_copy_source (id int, note varchar(80));
+insert into file_sql_copy_source values (1, 'x|y'), (2, null);
+eval copy file_sql_copy_source to '$FILE_SQL_DATA_DIR/edge.csv'
+       (format csv, header, delimiter '|', nullstr 'missing');
+eval select id, note from read_csv('$FILE_SQL_DATA_DIR/edge.csv', delimiter = '|', nullstr = 'missing')
+      order by id;
+--disable_result_log
+--error 1086
+eval copy file_sql_copy_source to '$FILE_SQL_DATA_DIR/edge.csv' (format csv);
+--enable_result_log
+drop table file_sql_copy_source;
+
+--echo # Reject paths outside secure_file_priv
+set @file_sql_previous_secure_dir = @@global.secure_file_priv;
+eval set global secure_file_priv = '$FILE_SQL_DATA_DIR';
+--disable_result_log
+--error 1105,9731
+eval select * from read_csv('$FILE_SQL_DATA_DIR/../outside.csv');
+--enable_result_log
+set global secure_file_priv = @file_sql_previous_secure_dir;
+
+set session enable_file_sql = OFF;
+--enable_query_log
+--source mysql_test/test_suite/file_sql/include/remove_file_sql_data.inc

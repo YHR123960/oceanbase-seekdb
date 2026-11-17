@@ -3158,6 +3158,25 @@ int ObSql::get_outline_data(ObPlanCacheCtx &pc_ctx,
   return ret;
 }
 
+static bool contains_file_sql(const ParseNode *root)
+{
+  std::vector<const ParseNode *> pending{root};
+  while (!pending.empty()) {
+    const ParseNode *node = pending.back();
+    pending.pop_back();
+    if (node != nullptr) {
+      if (node->type_ == T_FILE_TABLE
+          || (node->type_ == T_INTO_OUTFILE && node->num_child_ == 2 && node->value_ == 1)) {
+        return true;
+      }
+      for (int64_t i = 0; i < node->num_child_; ++i) {
+        if (node->children_[i] != nullptr) pending.push_back(node->children_[i]);
+      }
+    }
+  }
+  return false;
+}
+
 int ObSql::parser_and_check(const ObString &outlined_stmt,
                             ObExecContext &exec_ctx,
                             ObPlanCacheCtx &pc_ctx,
@@ -3275,6 +3294,14 @@ int ObSql::parser_and_check(const ObString &outlined_stmt,
         }
       }
     }
+  }
+
+  if (OB_SUCC(ret) && contains_file_sql(parse_result.result_tree_)) {
+    // The schema and identity belong to the literal file at resolution time.
+    // Preserve literal arguments and infer a fresh schema for each statement.
+    add_plan_to_pc = false;
+    is_explain_parameterize = false;
+    pc_ctx.should_add_plan_ = false;
   }
 
   if (OB_SUCC(ret)) {

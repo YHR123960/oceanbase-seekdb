@@ -16,6 +16,8 @@
 
 #define USING_LOG_PREFIX SQL_RESV
 #include "sql/resolver/dml/ob_select_resolver.h"
+#include "sql/engine/basic/ob_function_table_op.h"
+#include <set>
 #include "sql/resolver/dml/ob_del_upd_resolver.h"
 #include "share/ob_time_utility2.h"
 #include "sql/resolver/dml/ob_aggr_expr_push_up_analyzer.h"
@@ -3081,6 +3083,69 @@ int ObSelectResolver::resolve_into_outfile_without_format(const ParseNode *node,
   return ret;
 }
 
+int ObSelectResolver::resolve_file_copy(const ParseNode &node, ObSelectIntoItem &item)
+{
+  int ret = OB_SUCCESS;
+  ObString root;
+  file_sql::ScanSpec spec;
+  spec.options.header = false;
+  const ParseNode *path = node.children_[0];
+  const ParseNode *options = node.children_[1];
+  CK (OB_NOT_NULL(path) && OB_NOT_NULL(session_info_) && OB_NOT_NULL(allocator_));
+  OZ (get_file_sql_root(*session_info_, *allocator_, root));
+  if (OB_SUCC(ret)) {
+    spec.path.assign(path->str_value_, path->str_len_);
+    OZ (resolve_into_const_node(path, item.outfile_name_));
+  }
+  std::set<std::string> seen;
+  for (int64_t i = 0; OB_SUCC(ret) && options != nullptr && i < options->num_child_; ++i) {
+    const ParseNode *pair = options->children_[i];
+    const ParseNode *key_node = pair->children_[0];
+    const ParseNode *value = pair->children_[1];
+    std::string key(key_node->str_value_, key_node->str_len_);
+    for (char &c : key) if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+    if (key == "delim" || key == "sep") key = "delimiter";
+    if (key == "nullstr") key = "null_text";
+    const ObString arg = value != nullptr && value->str_value_ != nullptr
+        ? ObString(value->str_len_, value->str_value_) : ObString();
+    const bool string = value != nullptr && value->type_ == T_VARCHAR;
+    if (!seen.insert(key).second) {
+      ret = OB_ERR_PARSER_SYNTAX;
+    } else if (key == "format" && arg.case_compare("csv") == 0) {
+    } else if (key == "header" && (value == nullptr || value->type_ == T_BOOL)) {
+      spec.options.header = value == nullptr || value->value_ != 0;
+    } else if (key == "null_text" && string) {
+      spec.options.null_text.assign(arg.ptr(), arg.length());
+    } else if (key == "delimiter" && string && arg.length() == 1) {
+      spec.options.delimiter = arg[0];
+    } else if (key == "quote" && string && arg.length() == 1) {
+      spec.options.quote = arg[0];
+    } else if (key == "escape" && string && arg.length() == 1) {
+      spec.options.escape = arg[0];
+    } else {
+      ret = OB_ERR_PARSER_SYNTAX;
+    }
+  }
+  if (seen.count("escape") == 0) spec.options.escape = spec.options.quote;
+  ObSelectStmt *stmt = get_select_stmt();
+  CK (OB_NOT_NULL(stmt));
+  if (OB_SUCC(ret) && !file_sql::valid_options(spec.options)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_USER_ERROR(OB_INVALID_ARGUMENT, "COPY CSV options");
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && i < stmt->get_select_item_size(); ++i) {
+    const ObString name = stmt->get_select_item(i).alias_name_;
+    spec.columns.push_back({name.empty() ? "column" + std::to_string(i + 1)
+                                        : std::string(name.ptr(), name.length()),
+                            "", file_sql::Type::VARCHAR, false});
+  }
+  if (OB_SUCC(ret)) {
+    const auto encoded = spec.encode();
+    OZ (ob_write_string(*allocator_, ObString(encoded.size(), encoded.data()), item.file_copy_spec_));
+  }
+  return ret;
+}
+
 int ObSelectResolver::resolve_into_clause(const ParseNode *node)
 {
   int ret = OB_SUCCESS;
@@ -3105,7 +3170,9 @@ int ObSelectResolver::resolve_into_clause(const ParseNode *node)
       new(into_item) ObSelectIntoItem();
       into_item->into_type_ = node->type_;
       if (T_INTO_OUTFILE == node->type_) { // into outfile
-        if (is_in_set_query()) {
+        if (node->num_child_ == 2 && node->value_ == 1) {
+          OZ (resolve_file_copy(*node, *into_item));
+        } else if (is_in_set_query()) {
           ret = OB_INAPPROPRIATE_INTO;
         } else if (node->num_child_ == 3 && NULL != node->children_[1]
             && T_EXTERNAL_FILE_FORMAT == node->children_[1]->type_) { // Handle with `FORMAT`

@@ -91,6 +91,7 @@ public:
   int64_t buffer_size_;
   bool is_overwrite_;
   ObExternalFileFormat::StringData external_properties_;
+  common::ObString file_copy_spec_;
   static const int64_t DEFAULT_MAX_FILE_SIZE = 256LL * 1024 * 1024;
   static const int64_t DEFAULT_BUFFER_SIZE = 1LL * 1024 * 1024;
 };
@@ -195,6 +196,8 @@ public:
   virtual void destroy() override;
 
 private:
+  int execute_file_copy();
+  bool file_copy_done_ = false;
   int init_env_common();
   int init_csv_env();
   void set_csv_format_options();

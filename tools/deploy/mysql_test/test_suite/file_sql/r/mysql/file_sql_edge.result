@@ -1,0 +1,15 @@
+# Cross-format join, projection and grouping
+id	name
+3	Chen
+2	Bob
+id	note
+1	NULL
+2	NULL
+3	ok
+active	n	total
+1	2	4
+# COPY table, CSV dialect, NULL and exclusion of existing targets
+id	note
+1	x|y
+2	NULL
+# Reject paths outside secure_file_priv

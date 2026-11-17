@@ -5458,6 +5458,7 @@ int ObStaticEngineCG::generate_spec(ObLogSelectInto &op, ObSelectIntoSpec &spec,
   } else if (OB_FAIL(deep_copy_obj(alloc, op.get_closed_cht(), spec.closed_cht_))) {
   } else if (OB_FAIL(deep_copy_obj(alloc, op.get_escaped_cht(), spec.escaped_cht_))) {
   } else if (OB_FAIL(spec.external_properties_.store_str(op.get_external_properties()))) {
+  } else if (OB_FAIL(ob_write_string(alloc, op.get_file_copy_spec(), spec.file_copy_spec_))) {
   } else if (OB_FAIL(spec.user_vars_.init(op.get_user_vars().count()))) {
   } else if (OB_FAIL(spec.select_exprs_.init(op.get_select_exprs().count()))) {
   } else {
@@ -5500,6 +5501,7 @@ int ObStaticEngineCG::generate_spec(ObLogFunctionTable &op, ObFunctionTableSpec 
   ObRawExpr *value_raw_expr = nullptr;
   ObExpr *value_expr = nullptr;
   int ret = OB_SUCCESS;
+  const TableItem *table_item = nullptr;
   if (OB_ISNULL(op.get_stmt())) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(spec.column_exprs_.init(op.get_stmt()->get_column_size()))) {
@@ -5507,10 +5509,20 @@ int ObStaticEngineCG::generate_spec(ObLogFunctionTable &op, ObFunctionTableSpec 
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_ISNULL(value_raw_expr = op.get_value_expr())) {
     ret = OB_ERR_UNEXPECTED;
+  } else if (OB_ISNULL(table_item = op.get_stmt()->get_table_item_by_id(op.get_table_id()))) {
+    ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(generate_rt_expr(*value_raw_expr, value_expr))) {
   } else {
     spec.has_correlated_expr_ = value_raw_expr->has_flag(CNT_DYNAMIC_PARAM);
     spec.value_expr_ = value_expr;
+    if (!table_item->file_scan_spec_.empty()) {
+      OZ (ob_write_string(alloc, table_item->file_scan_spec_, spec.file_scan_spec_));
+      OZ (spec.file_projection_.init(op.get_stmt()->get_column_size()));
+      spec.max_batch_size_ = std::min<int64_t>(spec.max_batch_size_, 32);
+    } else {
+      // PL and existing system table functions continue to use their row interface.
+      spec.max_batch_size_ = 0;
+    }
     for (int64_t i = 0; OB_SUCC(ret) && i < op.get_output_exprs().count(); ++i) {
       if (OB_FAIL(mark_expr_self_produced(op.get_output_exprs().at(i)))) {
       }
@@ -5526,6 +5538,9 @@ int ObStaticEngineCG::generate_spec(ObLogFunctionTable &op, ObFunctionTableSpec 
         OZ (mark_expr_self_produced(col_item->expr_));
         OZ (generate_rt_expr(*col_item->expr_, rt_expr));
         OZ (spec.column_exprs_.push_back(rt_expr));
+        if (!spec.file_scan_spec_.empty()) {
+          OZ (spec.file_projection_.push_back(col_item->column_id_ - OB_APP_MIN_COLUMN_ID));
+        }
       }
     }
   }
