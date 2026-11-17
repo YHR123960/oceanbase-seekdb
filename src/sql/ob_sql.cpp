@@ -15,6 +15,7 @@
  */
 
 #define USING_LOG_PREFIX SQL
+#include "sql/resolver/dml/ob_stmt_expr_visitor.h"
 #include "config_bridge.h"
 #include "sql/ob_sql.h"
 #include "lib/json/ob_json_print_utils.h"
@@ -2306,6 +2307,56 @@ int ObSql::generate_physical_plan(ParseResult &parse_result,
   return ret;
 }
 
+namespace
+{
+int collect_ai_read_columns(const ObDMLStmt &stmt, const ObDMLStmt &root, ObIArray<uint64_t> &columns)
+{
+  int ret = OB_SUCCESS;
+  bool overflow = false;
+  ObStmtExprGetter visitor;
+  ObSEArray<ObRawExpr *, 16> exprs;
+  ObSEArray<ObRawExpr *, 16> refs;
+  ObSEArray<ObSelectStmt *, 4> children;
+  visitor.set_relation_scope();
+  visitor.remove_scope(SCOPE_DML_COLUMN);
+  visitor.remove_scope(SCOPE_DML_CONSTRAINT);
+  visitor.remove_scope(SCOPE_DMLINFOS);
+  if (OB_FAIL(check_stack_overflow(overflow))) {
+  } else if (overflow) {
+    ret = OB_SIZE_OVERFLOW;
+  } else if (OB_FAIL(stmt.get_relation_exprs(exprs, visitor))) {
+  } else if (OB_FAIL(ObRawExprUtils::extract_column_exprs(exprs, refs))) {
+  } else if (OB_FAIL(stmt.get_child_stmts(children))) {
+  } else {
+    for (int64_t i = 0; OB_SUCC(ret) && i < refs.count(); ++i) {
+      const auto &ref = static_cast<const ObColumnRefRawExpr &>(*refs.at(i));
+      if (ref.is_ai_column()) {
+        const TableItem *table = stmt.get_table_item_by_id(ref.get_table_id());
+        if (table == nullptr && &stmt != &root) {
+          table = root.get_table_item_by_id(ref.get_table_id());
+        }
+        if (table != nullptr && table->is_basic_table()) {
+          bool present = false;
+          for (int64_t j = 0; !present && j < columns.count(); j += 2) {
+            present = columns.at(j) == table->ref_id_ && columns.at(j + 1) == ref.get_column_id();
+          }
+          if (!present && OB_FAIL(columns.push_back(table->ref_id_))) {
+          } else if (!present) {
+            ret = columns.push_back(ref.get_column_id());
+          }
+        }
+      }
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < children.count(); ++i) {
+      if (children.at(i) != nullptr) {
+        ret = collect_ai_read_columns(*children.at(i), root, columns);
+      }
+    }
+  }
+  return ret;
+}
+}
+
 int ObSql::generate_plan(ParseResult &parse_result,
                         ObPlanCacheCtx *pc_ctx,
                         ObSqlCtx &sql_ctx,
@@ -2405,6 +2456,8 @@ int ObSql::generate_plan(ParseResult &parse_result,
     }
 
     if (OB_FAIL(ret)) {
+    } else if ((stmt->is_select_stmt() || stmt->is_update_stmt() || stmt->is_delete_stmt())
+               && OB_FAIL(collect_ai_read_columns(*stmt, *stmt, phy_plan->get_ai_read_columns()))) {
     } else if (OB_FAIL(transform_stmt(&stmt->get_query_ctx()->sql_schema_guard_,
                                       opt_stat_mgr_,
                                       &self_addr_,

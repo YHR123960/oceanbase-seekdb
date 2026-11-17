@@ -1,0 +1,63 @@
+# Verify selective retry and strict reads in the caller's own transaction.
+--exec python3 mysql_test/test_suite/ai_column/include/ai_column_mock.py start 19124
+--disable_query_log
+CREATE DATABASE ai_column_manual_retry;
+CALL DBMS_AI_SERVICE.CREATE_AI_MODEL('manual_retry_model', '{"type":"completion","model_name":"mock-complete"}');
+CALL DBMS_AI_SERVICE.CREATE_AI_MODEL_ENDPOINT('manual_retry_ep',
+  '{"ai_model_name":"manual_retry_model","url":"http://127.0.0.1:19124/v1/chat/completions","access_key":"mock-only","provider":"openai","request_model_name":"mock-complete"}');
+CREATE TABLE ai_column_manual_retry.docs (
+  id BIGINT PRIMARY KEY,
+  status VARCHAR(20),
+  body VARCHAR(100),
+  generated_text VARCHAR(200) AI COLUMN (AI_COMPLETE('manual_retry_model', body))
+);
+INSERT INTO ai_column_manual_retry.docs (id, status, body)
+VALUES (1, 'active', 'first'), (2, 'inactive', 'second');
+let $remaining = 100;
+let $ready = 0;
+while ($remaining)
+{
+  let $ready = `SELECT COUNT(*) = 2 FROM ai_column_manual_retry.docs WHERE generated_text IS NOT NULL`;
+  if ($ready == 1)
+  {
+    let $remaining = 0;
+  }
+  if ($ready == 0)
+  {
+    --real_sleep 0.1
+    dec $remaining;
+  }
+}
+SELECT COUNT(*) = 2 AS initially_ready
+FROM ai_column_manual_retry.docs WHERE generated_text IS NOT NULL;
+START TRANSACTION;
+ALTER TABLE ai_column_manual_retry.docs RETRY AI COLUMN generated_text
+WHERE status = 'READY' AND `status` = 'active';
+SELECT SUM(id = 1 AND generated_text IS NULL) = 1 AND
+       SUM(id = 2 AND generated_text IS NOT NULL) = 1 AS selective_retry
+FROM ai_column_manual_retry.docs;
+SELECT COUNT(*) = 1 AS one_retry_task
+FROM oceanbase.__all_ai_column_task task
+JOIN oceanbase.__all_table t ON t.table_id = task.table_id
+JOIN oceanbase.__all_database d ON d.database_id = t.database_id
+WHERE d.database_name = 'ai_column_manual_retry' AND t.table_name = 'docs';
+SET SESSION ai_column_strict_read = ON;
+--disable_result_log
+--error 11120
+SELECT generated_text FROM ai_column_manual_retry.docs WHERE id = 2;
+--enable_result_log
+SET SESSION ai_column_strict_read = OFF;
+ROLLBACK;
+SELECT COUNT(*) = 2 AS retry_rollback_restores_both
+FROM ai_column_manual_retry.docs WHERE generated_text IS NOT NULL;
+--disable_result_log
+--error 1235
+ALTER TABLE ai_column_manual_retry.docs RETRY AI COLUMN body;
+--error 1235
+ALTER TABLE ai_column_manual_retry.docs RETRY AI COLUMN generated_text WHERE id=1, ADD COLUMN n INT;
+--enable_result_log
+DROP DATABASE ai_column_manual_retry;
+CALL DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('manual_retry_ep');
+CALL DBMS_AI_SERVICE.DROP_AI_MODEL('manual_retry_model');
+--enable_query_log
+--exec python3 mysql_test/test_suite/ai_column/include/ai_column_mock.py stop 19124

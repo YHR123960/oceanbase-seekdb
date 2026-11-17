@@ -402,6 +402,11 @@ int ObAlterTableResolver::resolve_action_list(const ParseNode &node)
       } else {
         switch (action_node->type_) {
         //deal with alter table option
+        case T_AI_COLUMN_RETRY: {
+          ret = OB_NOT_SUPPORTED;
+          LOG_USER_ERROR(OB_NOT_SUPPORTED, "combining AI COLUMN RETRY with another ALTER action");
+          break;
+        }
         case T_ALTER_TABLE_OPTION: {
             alter_table_stmt->set_alter_table_option();
             if (OB_ISNULL(action_node->children_)) {

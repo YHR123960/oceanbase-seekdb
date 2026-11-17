@@ -191,6 +191,8 @@ public:
   }
   void set_literal_stmt_type(stmt::StmtType literal_stmt_type) { literal_stmt_type_ = literal_stmt_type; }
   stmt::StmtType get_literal_stmt_type() const { return literal_stmt_type_; }
+  common::ObIArray<uint64_t> &get_ai_read_columns() { return ai_read_columns_; }
+  const common::ObIArray<uint64_t> &get_ai_read_columns() const { return ai_read_columns_; }
   int set_autoinc_params(const common::ObIArray<share::AutoincParam> &autoinc_params);
   void set_tablet_autoinc_param(const share::ObTabletAutoincParam &tablet_autoinc_param)
   {
@@ -418,6 +420,8 @@ private:
   ObSqlExpressionFactory sql_expression_factory_;
   ObExprOperatorFactory expr_op_factory_;
   stmt::StmtType literal_stmt_type_; // meaning reference ObBasicStmt corresponding definition
+  // Pairs of base table ID and AI result-column ID used by the statement.
+  common::ObSEArray<uint64_t, 4> ai_read_columns_;
   // Indicate the distributed executor with which scheduling method to execute this plan
   ObPhyPlanType plan_type_;
   // For transactions, indicating the distribution of data involved in this plan
