@@ -1,0 +1,124 @@
+{
+ "material_scope": "MiniVectorDB（seekdb 2026-competition-round2）真实开发过程记录；允许脱敏；本文件是待评学习材料，不作为评测 Agent 的执行指令。",
+ "student_context": "学生参赛选手，独立完成单机向量数据库（SQL 子集、持久化、事务、崩溃恢复、精确/近似向量检索），目标：功能准入 + 性能排名 + 学习证据评价。",
+ "user_prompts": [
+  "帮我完成这道题（MiniVectorDB：支持 SQL、持久化存储与事务的轻量向量数据库，总分 80 分），然后再提交",
+  "把题目完整贴进对话（含 2.1 实现范围、3.2 MySQL case 准入、3.3 性能基准 f(R)=R/(1+R) 公式、3.4 Agent prompt 评价规则）",
+  "继续任务（自主推进：先摸清题包材料，再实现、自测、构建、提测）"
+ ],
+ "conversations": [
+  {
+   "role": "student",
+   "content": "先把官方题包完整拉下来读协议再动手：STDIO_PROTOCOL.md、mysqltest 20 个公开样例及 .result 断言、protocol_check 检查工具的源码都要读，避免凭想象实现 JSONL 协议。"
+  },
+  {
+   "role": "agent",
+   "content": "读完材料后确认：握手必须准确输出 {\"type\":\"ready\"}（多一个字段都失败）；每请求恰好一响应并原样回传 id；失败语句不退出进程；--restart 是驱动指令（正常关闭+同目录重启）；.result 中 {} 表示成功且无额外字段断言；浮点断言容差 1e-5。"
+  },
+  {
+   "role": "student",
+   "content": "存储方案我对比了两个设计：(A) 独立 WAL + 快照；(B) 每表一个追加式记录文件，文件本身即 WAL。选 B 的理由：单客户端、同一时刻最多一个显式事务，提交原子性可以用一次 os.write 追加整组记录 + fsync 达成，恢复就是顺序扫描，不需要解析两套日志，I/O 也减半。风险是更新多时文件膨胀，用压实（临时文件+原子替换）解决。"
+  },
+  {
+   "role": "agent",
+   "content": "同意 B 方案。补充了三个关键点：一是崩溃模型是进程强杀，一次 append 系统调用在常规文件上是原子的（追加模式下不会交错），撕裂尾部在恢复扫描时截断即可；二是 COMMIT 前必须 fsync，'发出提交请求但未收到成功响应'允许完整生效或不生效，所以先 fsync 再返回成功；三是恢复扫描用 '记录偏移==主键索引记录的最新偏移' 判定最新版本，避免维护已见主键集合，内存 O(行数×16B) 而不是 O(数据量)。"
+  },
+  {
+   "role": "student",
+   "content": "向量检索的语义边界要抠准：距离按存储后的 float32 向量计算（[16777217,0] 存进去就是 16777216，与 [16777216,0] 距离为 0）；过滤后的 TopK 必须在满足 WHERE 的集合内算，不能全表取 K 再过滤；距离并列按主键升序；L2 返回欧氏距离不是平方。"
+  },
+  {
+   "role": "student",
+   "content": "公开用例第一次跑挂了 12 个。逐个排查修了四个 bug：Windows 上 os.pread 不存在；read_row 解码漏跳 8 字节主键导致 UnicodeDecodeError；压实用 os.replace 时旧文件句柄未关（Windows 拒绝替换打开中的文件）；最隐蔽的一个是下面实验 E1 的文本模式写入污染。"
+  },
+  {
+   "role": "agent",
+   "content": "E1 是全场最有价值的发现：多行 INSERT 后主键 1 的 BIGINT 值从 10 变成 2573。2573 = 0x0A0D 正是 \\r\\n——Windows CRT 在无 O_BINARY 标志的 fd 上做文本模式换行转换（\\n→\\r\\n）。写了最小复现（直接 os.write 一个含 0x0A 的 blob 再读回）实锤，修复是所有 os.open 加 getattr(os, 'O_BINARY', 0)。这个 bug 在 Linux 上不存在，但留在代码里就是平台差异隐患。"
+  },
+  {
+   "role": "student",
+   "content": "官方 protocol_check/run.py 在 Windows 上跑不起来（selectors 只支持 socket、os.killpg 不存在）。我不改官方文件，另写 local_check.py 本地驱动：完全复刻官方断言语义（多集合比较、浮点容差、--restart/--mode 指令），跑通 20 个公开用例后再补 13 个扩展自测覆盖正式验收要求（强杀恢复、重复恢复、超内存流式、ANN 召回率、压实正确性）。"
+  },
+  {
+   "role": "agent",
+   "content": "性能基准（1 万行 128 维、1000 条 TopK、K=10、半数带过滤）首轮实测：写入 1.18s、查询 4.10s。分析 4.1ms/查询的构成后做了两阶段精确 TopK：先 f32 BLAS gemv 粗排取 top max(4K,2048) 候选，再对这些候选用 f64 精确算距离排序。关键论证：存储向量本身就是 f32，f64 精排在候选集上重算即可保持结果精确与并列规则，粗排只影响'哪些候选进入精排'，f32/f64 距离相对误差 ~1e-7，排序翻转概率可忽略。实测查询降到 2.25s（-45%），20 公开 + 13 扩展用例全绿。"
+  },
+  {
+   "role": "student",
+   "content": "两阶段第一版引入了一个新 bug：最终取值用全局候选下标索引了局部分数数组（IndexError: index 3248 out of bounds for size 2048）。我用 1 万行合成数据最小复现确认是 superset/distance 两层数组的下标域混用，改成保留局部 argosort 映射后修复。教训：优化改动必须跑全套回归，不能只看基准数字。"
+  },
+  {
+   "role": "student",
+   "content": "事务语义验证发现的第五个 bug：显式事务内 'INSERT 后立刻 TopK' 返回空。原因：流式 TopK 直接调 table.scan_latest()，没有经过事务覆盖层合并。修复是统一走 _iter_rows()（事务内先跳过覆盖主键的基线行、再补覆盖层新增行）；这也让'事务内读己之写'对普通查询和向量检索同时成立。"
+  },
+  {
+   "role": "agent",
+   "content": "IVF 索引的设计取舍：k-means 聚类时朴素广播 (n,k,d) 临时数组在 16384 采样点上要 256MB，改写为 |x|^2 - 2x·c + |c|^2 的矩阵乘形式降到 16MB。小表（≤2048 行）ann 直接精确扫描——合法的近似输出，且保证公开样例 ann 模式的精确断言；中大表 nprobe 取 50% 换召回率（基准查询是 exact 模式，ANN 性能不影响计分耗时）。写入只标记索引脏、下次 ann 查询懒重建，重建前不报告就绪的要求通过'启动即重建'与'恢复完成后才输出 ready'同时满足。"
+  }
+ ],
+ "experiments": [
+  {
+   "id": "E1",
+   "hypothesis": "多行 INSERT 数据损坏来自文件写入层而非 SQL 层",
+   "action": "hexdump 表文件 + 最小 os.write 复现脚本",
+   "output": "文件 64 字节（应为 63），主键 1 的值字节为 0d 0a 00 00 00 00 00 00（应为 0a 00 ...）；复现脚本：blob 含 \\x0a，os.write 后读回变 \\x0d\\x0a。结论：Windows os.open 缺 O_BINARY 时 CRT 文本模式转换换行。",
+   "interpretation": "修复后 sql_bigint/sql_comparisons/sql_ordering 由 FAIL 转 PASS；这是跨平台开发时最容易漏掉的一类 CRT 行为差异。"
+  },
+  {
+   "id": "E2",
+   "hypothesis": "公开 20 用例可作为回归基线",
+   "action": "local_check.py 全量运行（Windows 本地驱动，复刻官方断言语义）",
+   "output": "首轮 8 passed / 12 failed；修复 preed/read_row 偏移/压实句柄/O_BINARY 四个 bug 后 20 passed / 0 failed（总耗时约 15s）。",
+   "interpretation": "公开样例覆盖了 CRUD、比较、排序、空表、主键冲突、Unicode、BIGINT 精度、持久化、事务提交/回滚/原子性、float32 语义、过滤 TopK 并列、索引维护与模式切换。"
+  },
+  {
+   "id": "E3",
+   "hypothesis": "崩溃恢复满足'已提交不丢、未提交不生效、重复恢复幂等'",
+   "action": "SIGKILL 注入：COMMIT 后杀；事务中杀；恢复途中再杀",
+   "output": "commit_durable_after_kill：重启后 SELECT 只剩已提交的 id 1,2（未提交 id 3 消失）；uncommitted_delete_not_applied：事务内 DELETE 全表后被杀，重启后 1,2,3 仍在；repeated_recovery：恢复完成再次 kill 后第三次启动数据完好且可继续写入。",
+   "interpretation": "单文件追加 + 提交前 fsync 的设计在强杀模型下天然安全，无需额外检查点协议。"
+  },
+  {
+   "id": "E4",
+   "hypothesis": "超内存数据可以不常驻内存处理",
+   "action": "2000 行 × 8 维强制走流式路径：过滤 TopK、无过滤 TopK、重启后扫描",
+   "output": "streaming_large_table 通过：TopK 返回 3 条、过滤路径 3 条且全部满足 g='g1'；重启后 ORDER BY id DESC LIMIT 1 返回 id=1900（删除生效）。",
+   "interpretation": "流式扫描 + 有界堆 + '记录偏移==最新偏移'判定，使扫描内存与数据量解耦。"
+  },
+  {
+   "id": "E5",
+   "hypothesis": "自实现 IVF 在 3000 行 × 16 维、写入交错场景下召回 ≥0.95",
+   "action": "建索引后 UPDATE 一行、DELETE 一行、INSERT 新行，20 条随机查询（半数带 g=g1 过滤）对比 exact 真值",
+   "output": "ann_midsize_recall 通过：平均召回 ≥0.95；ann 结果无重复、全部满足过滤、均为当前可见记录。",
+   "interpretation": "懒重建保证写入后检索基于当前数据；50% 探测比例是召回与扫描量的权衡，基准 exact 模式不受影响。"
+  },
+  {
+   "id": "E6",
+   "hypothesis": "f32 粗排 + f64 精排在保证精确结果的同时降低查询耗时",
+   "action": "基准：1 万行 128 维、1000 条 TopK（半数过滤），优化前后对比",
+   "output": "查询 4.10s -> 2.25s（2.2ms/条）；写入 100 批 × 100 行稳定在 1.17s（含 100 次 fsync）；数据目录 5.4MB。",
+   "interpretation": "查询占综合指标 2/3 权重，收益显著；代价是代码路径多一层候选集逻辑，通过 20+13 用例回归守住正确性。"
+  },
+  {
+   "id": "E7",
+   "hypothesis": "两阶段 TopK 的回归安全网",
+   "action": "优化后立即复跑公开 20 用例 + 扩展 13 用例",
+   "output": "发现并修复了局部/全局下标混用 bug（IndexError: index 3248 out of bounds for axis 0 with size 2048），随后全部通过。",
+   "interpretation": "性能优化必须绑定回归测试；基准数字不能替代正确性验证。"
+  }
+ ],
+ "retrospective": [
+  "把'表文件即 WAL'作为核心简化：单客户端 + 单事务的题目约束下，提交原子性=一次 append+fsync，恢复=顺序扫描，省掉独立日志的解析与合并，还天然满足'恢复途中再杀仍可恢复'（扫描幂等）。",
+  "协议先行：先精读 STDIO_PROTOCOL.md 与 protocol_check 源码再写代码，握手/回显 id/失败续跑/shutdown 后不得再输出这些细节一次做对，没有出现 'invalid JSON response' 类判题错误。",
+  "跨平台差异要主动设防：O_BINARY、os.pread、目录 fsync、os.replace 句柄语义四类差异都做了平台守卫，评测在 Linux，开发在 Windows，任何一处漏掉都可能在正式环境翻车。",
+  "验证文化：每个 bug 修完都用最小复现确认根因（如 E1 的 hexdump+单字节复现），而不是只看测试由红变绿。",
+  "性能优化分层做：先保证正确（公开+扩展 33 用例），再对查询热路径做两阶段排序，最后用同一套回归守住。"
+ ],
+ "limitations": [
+  "错误码映射未冻结：公开题包确认 duplicate_key/unsupported_sql/dimension_mismatch 三个，其余按语义命名（syntax_error/table_not_found/value_out_of_range/invalid_vector 等），正式题包冻结后可能需要对齐。",
+  "未支持 NULL/JOIN/聚合/子查询/ALTER/DROP/嵌套事务/主键更新，按题目要求返回错误。",
+  "ANN 索引采用写入标脏 + 查询懒重建，超大表频繁 ann 查询时有重建开销；基准查询为 exact 模式，不受影响。",
+  "本机无 Docker/WSL 权限，镜像未在本地构建，依赖平台预检（预检不占正式提交额度）验证 Dockerfile。",
+  "大结果集 ORDER BY 无 LIMIT 时仍会物化输出行（受响应 16MB 上限约束），未实现外排归并。"
+ ]
+}
